@@ -31,7 +31,8 @@ from salience import SalienceRanking, SalienceScore
 # verified, an amber for direction "lower", and a muted grey for chrome.
 _CSS = """
 <style>
-.gih { font-family: -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1f2937; max-width: 1080px; line-height: 1.45; }
+.gih { font-family: -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; color: #1f2937; max-width: 1080px; line-height: 1.45; overflow-wrap: normal; word-break: normal; hyphens: none; }
+.gih pre, .gih code { overflow-wrap: normal; word-break: normal; }
 .gih h1 { font-size: 1.6rem; margin: 0 0 .25rem 0; letter-spacing: -.01em; }
 .gih .sub { color: #6b7280; font-size: .95rem; margin-bottom: 1.25rem; }
 .gih .callout { border-left: 5px solid #0f766e; background: #f0fdfa; padding: .9rem 1.1rem; margin: 1rem 0 1.5rem 0; border-radius: 4px; }
