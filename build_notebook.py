@@ -30,7 +30,7 @@ REPO_URL = "https://github.com/RickPack/governed-insights-harness"
 # is self-contained when opened directly in Colab.
 PINS = (
     "langchain==1.4.1 langchain-core==1.6.3 langchain-google-genai==4.4.0 google-genai==2.24.0 "
-    "pydantic-ai==2.45.0 pydantic==2.13.4 duckdb==1.5.5 pandas==2.3.3 tabulate==0.10.0"
+    "pydantic-ai==2.45.0 pydantic==2.13.4 duckdb==1.5.5 pandas==2.3.3 tabulate==0.10.0 nest_asyncio==1.6.0"
 )
 
 
@@ -76,6 +76,12 @@ import os, sys, subprocess, pathlib
 
 # Keep PydanticAI's start-up banner out of the notebook output.
 os.environ["PYDANTIC_AI_NO_BANNER"] = "1"
+
+# Jupyter/Colab kernels already run an asyncio event loop. PydanticAI's
+# synchronous agent call needs one of its own, which raises "event loop is
+# already running" unless the loop is patched to allow nesting.
+import nest_asyncio
+nest_asyncio.apply()
 
 REPO_DIR = pathlib.Path("governed-insights-harness")
 if not REPO_DIR.exists() and not pathlib.Path("semantic_contracts.py").exists():
