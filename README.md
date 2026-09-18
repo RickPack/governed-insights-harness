@@ -9,6 +9,10 @@
 [![PydanticAI](https://img.shields.io/badge/PydanticAI-narrative%20synthesis-e92063.svg)](https://ai.pydantic.dev/)
 [![DuckDB](https://img.shields.io/badge/DuckDB-deterministic%20execution-fff000.svg)](https://duckdb.org/)
 
+> **Note on repository contributors:** GitHub's contributor graph for this repository has shown an entry labeled "BMTEORG." I do
+> not know why this appears. BMTEORG is the domain for a youth mentorship non-profit of which I am a member, and it has no
+> connection to this project's authorship or content.
+
 A pattern for putting a language model between a business question and a revenue answer without letting the model touch a number.
 Two competing definitions of the same term run side by side from versioned contracts, every boundary the model crosses is a typed
 Pydantic model, and every figure in the final narrative is traced back to an executed query before anyone reads it.
