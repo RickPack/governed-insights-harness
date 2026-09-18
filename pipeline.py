@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import duckdb
 from langchain_core.language_models import BaseChatModel
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 from pydantic_ai.models import Model
 
 from governed_duckdb_tool import (
@@ -27,8 +27,7 @@ from governed_duckdb_tool import (
     ExecutionResult,
     GateOutcome,
     GovernedDuckDBTool,
-    contract_facts,
-    numeric_fact_base,
+    build_fact_base,
 )
 from langchain_context_chain import build_planning_chain, default_chat_model
 from narrative_agent import ExecutiveDeliverable, NarrativeBrief, synthesize_narrative
@@ -39,8 +38,6 @@ from synthetic_data import TierSummary, build_database
 
 class PipelineRun(BaseModel):
     """Every artifact of one governed run, in the order it was produced."""
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     query: str = Field(description="The business question asked.")
     dataset: TierSummary = Field(description="Shape of the synthetic dataset the run executed against.")
@@ -101,13 +98,14 @@ def run_dual_lens_pipeline(
     )
 
     # 4. Synthesise, with the zero-token-math gate as the output validator.
-    # The fact base is everything deterministic: result cells, row counts,
-    # salience statistics, and the governed thresholds from both contracts.
-    fact_base = numeric_fact_base(
-        [department_result, enterprise_result],
-        department_salience.numeric_facts()
-        + enterprise_salience.numeric_facts()
-        + contract_facts(governed_plan.context),
+    # The fact base is exactly what the brief shows the model, per lens: row
+    # counts, salience statistics, and the governed thresholds of each contract.
+    fact_base = build_fact_base(
+        governed_plan.context,
+        department_result,
+        enterprise_result,
+        department_salience,
+        enterprise_salience,
     )
     brief = NarrativeBrief(
         context=governed_plan.context,

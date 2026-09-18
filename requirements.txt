@@ -12,3 +12,7 @@ tabulate==0.10.0
 pytest==9.1.1
 nbformat==5.11.1
 nest_asyncio==1.6.0
+# Needed only by execute_notebook.py, which refreshes the committed notebook's outputs.
+nbclient==0.11.0
+nbconvert==7.17.1
+ipykernel==7.3.0

@@ -29,6 +29,7 @@ steps, and a reader can trace it in one pass by following the pipe operator.
 from __future__ import annotations
 
 import os
+from typing import Any, Mapping
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.prompts import ChatPromptTemplate
@@ -124,8 +125,12 @@ prompt_template = ChatPromptTemplate.from_messages(
 )
 
 
-def _prompt_inputs(inputs: dict) -> dict[str, str]:
-    """Flatten the resolved context into the string slots the prompt template expects."""
+def _prompt_inputs(inputs: Mapping[str, Any]) -> dict[str, str]:
+    """Flatten the resolved context into the string slots the prompt template expects.
+
+    The mapping in and out is LCEL's own carrier between RunnableParallel and
+    ChatPromptTemplate; the typed objects live inside it and are what get read.
+    """
     context: ResolvedContext = inputs["context"]
     return {
         "query": inputs["query"],
@@ -161,7 +166,7 @@ def default_chat_model(model_name: str = DEFAULT_MODEL_NAME) -> BaseChatModel:
     return ChatGoogleGenerativeAI(model=model_name)
 
 
-def _bind_plan_to_context(inputs: dict) -> GovernedPlan:
+def _bind_plan_to_context(inputs: Mapping[str, Any]) -> GovernedPlan:
     """Assemble the final GovernedPlan. Its validator checks every plan cites the contract that was resolved."""
     return GovernedPlan(context=inputs["context"], plan=inputs["plan"])
 

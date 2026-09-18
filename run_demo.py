@@ -84,6 +84,7 @@ def _print_salience(ranking: SalienceRanking, top_n: int = 6) -> None:
         f"[{ranking.lens.upper()} LENS]  segment {ranking.segment_size} of {ranking.baseline_size} "
         f"(contract {ranking.contract_id} v{ranking.contract_version})"
     )
+    print(f"  {ranking.lead_insight()}")
     print(tabulate(rows, headers=["attribute", "segment", "baseline", "effect", "direction", "method"], tablefmt="simple"))
     print()
 

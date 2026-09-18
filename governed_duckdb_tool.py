@@ -22,12 +22,16 @@ This module puts it on code that can be unit-tested:
 THE ZERO-TOKEN-MATH GATE
 ------------------------
 The final narrative cites figures in a typed list field (cited_metrics), not
-in prose. This module checks every one of those values against the union of
-the executed result sets. A figure that cannot be traced to a query result
-fails the gate. Because the cited figures are a typed field rather than prose
-parsed with a regular expression, the check is exact: a year, a rank, or a
-count in the prose can never be mistaken for a metric, and a metric can never
-hide in the prose unchecked.
+in prose. This module checks every one of those values against a FactBase:
+the exact set of figures the model was shown for each lens, all of which came
+from executed queries, salience arithmetic, or versioned contracts. A figure
+that cannot be traced fails the gate; so does a real figure cited under the
+wrong lens. Because the cited figures are a typed field rather than prose
+parsed with a regular expression, the primary check is exact: a year, a rank,
+or a version number in the prose can never be mistaken for a metric. A second,
+narrower pass confirms that every executive-formatted figure in the prose is
+present in the typed list, so the model cannot route a number around the gate
+by leaving it out of cited_metrics.
 
 Every tool call writes an AuditRecord: lens, contract version, SQL, row
 count, validator outcomes, timestamp. The audit trail is a typed list, so it
@@ -36,10 +40,9 @@ can be rendered, stored, or diffed without parsing log lines.
 
 from __future__ import annotations
 
-import math
 import re
 from datetime import datetime, timezone
-from typing import Iterable, Union
+from typing import TYPE_CHECKING, Iterable, Union
 
 import duckdb
 import pandas as pd
@@ -48,14 +51,18 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from semantic_contracts import CONTRACT_REGISTRY, Lens, MetricContract, PlannedQuery, ResolvedContext
 
+if TYPE_CHECKING:  # salience does not import this module; the name is only needed for hints
+    from salience import SalienceRanking
+
 # A DuckDB cell as it crosses the tool boundary. Kept to scalars so ResultTable
 # is JSON-serialisable and comparable without pandas.
 Scalar = Union[str, int, float, bool, None]
 
-# Relative tolerance for the gate. A cited figure must equal a computed figure
-# to one decimal place or to one part in a thousand, whichever is looser.
-_GATE_ABS_TOLERANCE = 0.05
-_GATE_REL_TOLERANCE = 1e-3
+# Every figure in the brief is presented to one decimal place, so a cited value
+# must equal a fact to that precision. There is deliberately no relative
+# tolerance: one part in a thousand of a five-figure revenue is a spread of
+# tens, which is room enough for a fabricated number to pass.
+_GATE_ABS_TOLERANCE = 0.051
 
 
 class GovernanceViolation(Exception):
@@ -83,15 +90,6 @@ class ResultTable(BaseModel):
 
     def to_dataframe(self) -> pd.DataFrame:
         return pd.DataFrame(self.rows, columns=self.columns)
-
-    def numeric_values(self) -> Iterable[float]:
-        """Every numeric cell, used to build the gate's fact base."""
-        for row in self.rows:
-            for value in row:
-                if isinstance(value, bool):
-                    continue
-                if isinstance(value, (int, float)) and not (isinstance(value, float) and math.isnan(value)):
-                    yield float(value)
 
 
 class ExecutionResult(BaseModel):
@@ -133,7 +131,10 @@ class GateOutcome(BaseModel):
 
     passed: bool = Field(description="True when every cited metric traced to an executed result.")
     checked: int = Field(description="Number of cited metrics examined.")
-    unverifiable: list[CitedMetric] = Field(description="Cited metrics with no matching computed value.")
+    unverifiable: list[CitedMetric] = Field(description="Cited metrics with no matching computed value for their lens.")
+    uncited_prose: list[float] = Field(
+        default_factory=list, description="Formatted figures found in the prose but absent from cited_metrics."
+    )
     detail: str = Field(description="Explanation suitable for a reviewer or an error message.")
 
 
@@ -315,60 +316,125 @@ def _to_scalar(value: object) -> Scalar:
 # ZERO-TOKEN-MATH GATE
 # ---------------------------------------------------------------------------
 
+# A figure as it is written for an executive: thousands separators, one or
+# more decimals, or both. Plain integers, version strings (1.2.0) and ranges
+# (6-10) are deliberately not matched, so they can never cause a false positive.
+_FORMATTED_FIGURE = re.compile(r"(?<![\d.])(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d+)(?![\d.])")
 
-def numeric_fact_base(results: Iterable[ExecutionResult], extra_facts: Iterable[float] = ()) -> list[float]:
-    """The union of every number the deterministic layer produced.
 
-    Includes every numeric cell of every executed result set, each result's
-    row count, and any additional deterministic facts: the salience means and
-    effect sizes (computed in SQL and Python, never by the model) and the
-    governed threshold values from the contracts (see contract_facts).
+class FactBase(BaseModel):
+    """Every figure the narrative is allowed to cite, partitioned by lens.
+
+    The base is exactly the set of numbers the model was shown in its brief:
+    segment and baseline sizes, salience statistics, and the governed
+    thresholds of each contract. Raw result cells are excluded on purpose.
+    The model never sees individual rows, so a cited value that happens to
+    equal some row's tenure is a fabrication that coincides with data, and
+    the gate must fail it. Partitioning by lens closes the other gap: a real
+    enterprise figure cited under the department lens is a wrong claim, not a
+    verified one.
     """
-    facts: list[float] = []
-    for result in results:
-        facts.extend(result.table.numeric_values())
-        facts.append(float(result.row_count))
-    facts.extend(float(v) for v in extra_facts)
-    return facts
+
+    department: list[float] = Field(description="Figures the department-lens narrative may cite.")
+    enterprise: list[float] = Field(description="Figures the enterprise-lens narrative may cite.")
+
+    def for_lens(self, lens: Lens) -> list[float]:
+        return self.department if lens == "department" else self.enterprise
+
+    def all_values(self) -> list[float]:
+        return self.department + self.enterprise
 
 
-def contract_facts(context: ResolvedContext) -> list[float]:
-    """Governed threshold values from both resolved contracts.
+def build_fact_base(
+    context: ResolvedContext,
+    department_result: ExecutionResult,
+    enterprise_result: ExecutionResult,
+    department_salience: "SalienceRanking",
+    enterprise_salience: "SalienceRanking",
+) -> FactBase:
+    """Assemble the per-lens fact base from executed results, salience statistics and contract thresholds."""
 
-    A narrative that says "licenses at or above the 5,000.0 floor" is citing
-    a versioned contract, not inventing a number. Contract thresholds are
-    deterministic facts and belong in the base the gate checks against.
-    """
-    return [float(t.value) for lens in ("department", "enterprise") for t in context.contract_for(lens).thresholds]
+    def lens_facts(lens: Lens, result: ExecutionResult, ranking: "SalienceRanking") -> list[float]:
+        thresholds = [float(t.value) for t in context.contract_for(lens).thresholds]
+        return [float(result.row_count)] + ranking.numeric_facts() + thresholds
+
+    return FactBase(
+        department=lens_facts("department", department_result, department_salience),
+        enterprise=lens_facts("enterprise", enterprise_result, enterprise_salience),
+    )
 
 
 def _matches(cited: float, fact: float) -> bool:
-    """A cited value matches a fact if equal to one decimal place or within one part in a thousand."""
-    return abs(cited - fact) <= _GATE_ABS_TOLERANCE or abs(cited - fact) <= _GATE_REL_TOLERANCE * abs(fact)
+    """A cited value matches a fact when they agree to one decimal place."""
+    return abs(cited - fact) <= _GATE_ABS_TOLERANCE
 
 
-def verify_cited_metrics(cited_metrics: list[CitedMetric], fact_base: Iterable[float]) -> GateOutcome:
+def uncited_prose_figures(prose: str, cited_metrics: list[CitedMetric]) -> list[float]:
+    """Formatted figures that appear in the prose but not in the typed cited_metrics list.
+
+    This is a completeness check on the typed field, not a substitute for it.
+    The typed list is what gets verified against executed results; this sweep
+    only guarantees the model cannot route a figure around that list by
+    leaving it out. It looks solely for executive-formatted numbers, so plain
+    integers, version strings and category ranges are never flagged.
+    """
+    cited_values = [m.value for m in cited_metrics]
+    found = [float(token.replace(",", "")) for token in _FORMATTED_FIGURE.findall(prose)]
+    return sorted({v for v in found if not any(_matches(v, c) for c in cited_values)})
+
+
+def verify_cited_metrics(
+    cited_metrics: list[CitedMetric],
+    fact_base: FactBase | Iterable[float],
+    prose: str = "",
+) -> GateOutcome:
     """ZERO-TOKEN-MATH GATE.
 
     Every value in the deliverable's typed cited_metrics field must trace to a
-    value in the fact base. This is an exact check over typed numbers, not a
-    regular expression over prose, so a year or a rank in the narrative can
-    never produce a false positive and a figure can never slip through unchecked.
+    figure in the fact base for the lens it claims. This is an exact check over
+    typed numbers, so a year, a rank or a version number in the prose can never
+    produce a false positive. When prose is supplied, a second pass confirms
+    that every executive-formatted figure in the prose is present in the typed
+    list, so a figure cannot bypass the check by being omitted from it.
+
+    A plain iterable of floats is accepted as a lens-agnostic fact base for
+    callers that have only one lens in hand.
     """
-    facts = list(fact_base)
-    unverifiable = [m for m in cited_metrics if not any(_matches(m.value, f) for f in facts)]
-    if unverifiable:
-        listing = "; ".join(f"{m.label} = {m.value:,.1f} ({m.lens})" for m in unverifiable)
+    if isinstance(fact_base, FactBase):
+        facts_for = fact_base.for_lens
+    else:
+        shared = list(fact_base)
+
+        def facts_for(_: Lens) -> list[float]:
+            return shared
+
+    unverifiable = [m for m in cited_metrics if not any(_matches(m.value, f) for f in facts_for(m.lens))]
+    uncited = uncited_prose_figures(prose, cited_metrics) if prose else []
+
+    if unverifiable or uncited:
+        problems: list[str] = []
+        if unverifiable:
+            listing = "; ".join(f"{m.label} = {m.value:,.1f} ({m.lens})" for m in unverifiable)
+            problems.append(
+                f"{len(unverifiable)} cited figure(s) do not trace to any executed result for their lens: {listing}"
+            )
+        if uncited:
+            listing = ", ".join(f"{v:,.1f}" for v in uncited)
+            problems.append(f"{len(uncited)} figure(s) appear in the prose but not in cited_metrics: {listing}")
         return GateOutcome(
             passed=False,
             checked=len(cited_metrics),
             unverifiable=unverifiable,
-            detail=f"ZERO-TOKEN-MATH GATE FAILED: {len(unverifiable)} cited figure(s) do not trace to any "
-            f"executed result: {listing}. Narrative suppressed; deterministic result sets are surfaced instead.",
+            uncited_prose=uncited,
+            detail="ZERO-TOKEN-MATH GATE FAILED: "
+            + " | ".join(problems)
+            + ". Narrative suppressed; deterministic result sets are surfaced instead.",
         )
     return GateOutcome(
         passed=True,
         checked=len(cited_metrics),
         unverifiable=[],
-        detail=f"ZERO-TOKEN-MATH GATE PASSED: all {len(cited_metrics)} cited figure(s) trace to executed results.",
+        uncited_prose=[],
+        detail=f"ZERO-TOKEN-MATH GATE PASSED: all {len(cited_metrics)} cited figure(s) trace to executed results "
+        "for their lens, and every formatted figure in the prose is cited.",
     )

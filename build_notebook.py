@@ -12,8 +12,13 @@ here as reviewable Python rather than as escaped strings in JSON.
 The notebook is a guided tour, not a script dump. Each markdown cell poses
 the question the next code cell answers, in this order: the ambiguity problem,
 how each lens computes its own answer, the two answers side by side, why they
-differ, and proof that every number is real. Outputs are left empty; the
-notebook is executed in Colab.
+differ, and proof that every number is real.
+
+This script writes the notebook with empty outputs. The committed copy is
+then executed in place (jupyter nbconvert --execute --inplace) so a reader on
+GitHub sees real numbers without opening Colab, and a dated note is inserted
+saying which run produced them. Regenerating with this script clears those
+outputs; re-execute before committing.
 """
 
 from __future__ import annotations
@@ -233,7 +238,8 @@ except GovernanceViolation as exc:
 
 Computing every attribute of a segment is easy. The harder question is which attributes *differentiate* it from its baseline.
 Salience is computed deterministically and separately for each lens, against that lens's own grain. Numeric attributes use Cohen's d;
-categorical attributes use the percentage-point delta at each level. Numeric distance math never touches a category code.
+categorical attributes use the percentage-point delta at each level. Numeric distance math never touches a category code. The one-line
+"most distinctive quality" sentence above each table is also computed, not written: it is the top-ranked score rendered as prose.
 
 The model has not been involved yet. These rankings are pure SQL and Python.
 """),
@@ -250,8 +256,10 @@ def salience_frame(ranking, n=6):
     return pd.DataFrame(rows)
 
 print(f"Department lens: segment {department_salience.segment_size} of {department_salience.baseline_size} licenses")
+print(" ", department_salience.lead_insight())
 display(salience_frame(department_salience))
 print(f"Enterprise lens: segment {enterprise_salience.segment_size} of {enterprise_salience.baseline_size} organizations")
+print(" ", enterprise_salience.lead_insight())
 display(salience_frame(enterprise_salience))
 """),
     # ------------------------------------------------------------------ 8
@@ -261,18 +269,19 @@ display(salience_frame(enterprise_salience))
 Now the second model call, and the only place PydanticAI is used. The agent receives both verified result sets and both salience
 rankings, and must return an `ExecutiveDeliverable`: a summary per lens, a reconciliation memo, and a typed `cited_metrics` list.
 
-The **zero-token-math gate** runs as the agent's output validator. Every value in `cited_metrics` is checked against the union of
-the executed results. A figure that does not trace is sent back to the model as a retry with the failing values named. If retries run
-out, the narrative is suppressed and the deterministic results stand on their own.
+The **zero-token-math gate** runs as the agent's output validator. Every value in `cited_metrics` is checked, for the lens it
+claims, against a fact base holding exactly the figures the brief showed the model: segment sizes, salience statistics and the
+governed thresholds. A second pass confirms every formatted figure in the prose is in that typed list. A figure that fails either
+check is sent back to the model as a retry with the failing values named. If retries run out, the narrative is suppressed and the
+deterministic results stand on their own.
 """),
     code("""
-from governed_duckdb_tool import numeric_fact_base, contract_facts
+from governed_duckdb_tool import build_fact_base
 from narrative_agent import NarrativeBrief, synthesize_narrative
 
-# Everything deterministic the narrative may cite: result cells, row counts, salience statistics, governed thresholds.
-fact_base = numeric_fact_base([department_result, enterprise_result],
-                              department_salience.numeric_facts() + enterprise_salience.numeric_facts()
-                              + contract_facts(context))
+# The fact base is exactly what the brief shows the model, per lens: segment sizes,
+# salience statistics, and the governed thresholds. Nothing the model was not shown is in it.
+fact_base = build_fact_base(context, department_result, enterprise_result, department_salience, enterprise_salience)
 brief = NarrativeBrief(context=context, department_result=department_result, enterprise_result=enterprise_result,
                        department_salience=department_salience, enterprise_salience=enterprise_salience)
 
@@ -307,18 +316,26 @@ HTML(render_executive_html(run))
     md("""
 ## 8. Proof that every number is real
 
-The narrative above cites figures only through a typed list, so the gate is an exact comparison of numbers, never a regular
-expression over prose. To see it work, take the verified deliverable and tamper with one cited value.
+The narrative above cites figures only through a typed list, so the gate's primary check is an exact comparison of numbers. To see
+it work, take the verified deliverable and tamper with it twice: add a fabricated cited value, then write a figure into the prose
+without citing it.
 """),
     code("""
 from governed_duckdb_tool import CitedMetric, verify_cited_metrics
 
 if narrative.deliverable:
-    tampered = list(narrative.deliverable.cited_metrics) + [
+    deliverable = narrative.deliverable
+    print(verify_cited_metrics(deliverable.cited_metrics, fact_base, prose=deliverable.prose()).detail, end="\\n\\n")
+
+    # Tamper one: a cited figure nothing computed.
+    fabricated = list(deliverable.cited_metrics) + [
         CitedMetric(label="a figure the model made up", lens="enterprise", value=12345.6)
     ]
-    print(verify_cited_metrics(narrative.deliverable.cited_metrics, fact_base).detail, end="\\n\\n")
-    print(verify_cited_metrics(tampered, fact_base).detail)
+    print(verify_cited_metrics(fabricated, fact_base, prose=deliverable.prose()).detail, end="\\n\\n")
+
+    # Tamper two: a figure written into the prose but left out of cited_metrics.
+    smuggled_prose = deliverable.prose() + " Retention in this segment stands at 97.3 percent."
+    print(verify_cited_metrics(deliverable.cited_metrics, fact_base, prose=smuggled_prose).detail)
 """),
     # ------------------------------------------------------------------ 11
     md("""

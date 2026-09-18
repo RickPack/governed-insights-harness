@@ -1,9 +1,13 @@
 # Sample run
 
-This is real, unedited output from `python run_demo.py`, captured on **2026-09-18 12:35 UTC** against Gemini
+This is real, unedited output from `python run_demo.py`, captured on **2026-09-18 13:06 UTC** against Gemini
 (`gemini-3.6-flash`), seed 42. Every number below comes from the executed DuckDB queries and salience computations, not from the
 model. The two SDK advisory log lines Google's client prints (about which credential it picked and about automatic function
 calling) were removed; nothing else was edited.
+
+The "most distinctive quality" line above each salience table is computed from the top-ranked score other than the selection
+metric; it is not written by the model. The gate line in section 6 reports both checks: every cited figure traced to the fact base
+for its lens, and every formatted figure in the prose was present in the typed cited_metrics list.
 
 To reproduce this yourself or see fresh numbers on a different seed or question, open the notebook in Colab — see the badge and
 Quickstart in [README.md](README.md) — and run all cells, or run `python run_demo.py` locally with `GOOGLE_API_KEY` set.
@@ -42,11 +46,11 @@ Synthetic dataset: 50 organizations, 119 licenses (both=4, breadth=10, concentra
 ==============================================================================
 [DEPARTMENT LENS]  threshold=high_value_floor
   SELECT license_id, license_revenue AS metric_value, org_maturity_band, tenure_years, module_count, deployment_channel, org_tier FROM licenses WHERE license_revenue >= 5000
-  rationale: This query selects all requested profile attributes and license_revenue aliased as metric_value from the licenses source table, filtering for high value licenses using the exact threshold license_revenue >= 5000.
+  rationale: This query selects license entities and profile attributes from the licenses table where annual seat-license revenue meets the high_value_floor threshold.
 
 [ENTERPRISE LENS]  threshold=high_value_floor
   SELECT organization_id, platform_revenue AS metric_value, org_maturity_band, tenure_years, module_count, deployment_channel, org_tier FROM organizations WHERE platform_revenue >= 25000
-  rationale: This query selects all requested profile attributes and platform_revenue aliased as metric_value from the organizations source table, filtering for high value organizations using the exact threshold platform_revenue >= 25000.
+  rationale: This query selects organization entities and profile attributes from the organizations table where consolidated platform revenue meets the high_value_floor threshold.
 
 
 ==============================================================================
@@ -81,24 +85,26 @@ O014                      30407.5  3-5                              12          
   5. SALIENCE RANKINGS (what differentiates each segment from its own baseline)
 ==============================================================================
 [DEPARTMENT LENS]  segment 21 of 119 (contract license_seat_revenue v1.2.0)
+  The most distinctive quality of this segment is tenure years: 17.5 vs 7.8 baseline (higher; Cohen's d +1.55).
 attribute                segment    baseline      effect  direction    method
 -----------------------  ---------  ----------  --------  -----------  ---------
 license_revenue          8,789.5    3,221.3         1.99  ^ higher     Cohen's d
-tenure_years             17.5       7.8             1.56  ^ higher     Cohen's d
+tenure_years             17.5       7.8             1.55  ^ higher     Cohen's d
 org_tier = smb           0.0%       41.2%          -1.39  v lower      pp delta
 org_maturity_band = 0-2  0.0%       14.3%          -0.78  v lower      pp delta
 org_maturity_band = 20+  42.9%      11.8%           0.73  ^ higher     pp delta
 org_maturity_band = 3-5  9.5%       37.0%          -0.68  v lower      pp delta
 
 [ENTERPRISE LENS]  segment 13 of 50 (contract organization_platform_revenue v2.0.0)
-attribute                        segment    baseline      effect  direction    method
--------------------------------  ---------  ----------  --------  -----------  ---------
-platform_revenue                 30,638.3   13,246.7        1.65  ^ higher     Cohen's d
-module_count                     8.9        4.7             1.37  ^ higher     Cohen's d
-org_tier = smb                   7.7%       46.0%          -0.93  v lower      pp delta
-org_maturity_band = 0-2          0.0%       16.0%          -0.82  v lower      pp delta
-deployment_channel = self_serve  15.4%      46.0%          -0.68  v lower      pp delta
-org_maturity_band = 6-10         46.2%      24.0%           0.47  ^ higher     pp delta
+  The most distinctive quality of this segment is module count: 8.9 vs 4.7 baseline (higher; Cohen's d +1.37).
+attribute                          segment    baseline      effect  direction    method
+---------------------------------  ---------  ----------  --------  -----------  ---------
+platform_revenue                   30,638.3   13,246.7        1.65  ^ higher     Cohen's d
+module_count                       8.9        4.7             1.37  ^ higher     Cohen's d
+org_tier = smb                     7.7%       46.0%          -0.93  v lower      pp delta
+org_maturity_band = 0-2            0.0%       16.0%          -0.82  v lower      pp delta
+deployment_channel = self_serve    15.4%      46.0%          -0.68  v lower      pp delta
+deployment_channel = direct_sales  61.5%      38.0%           0.48  ^ higher     pp delta
 
 
 ==============================================================================
@@ -107,43 +113,45 @@ org_maturity_band = 6-10         46.2%      24.0%           0.47  ^ higher     p
 [DEPARTMENT LENS]  executed  rows=21  source_table=pass, grain_discipline=pass, governed_thresholds=pass, cross_grain_join=pass
 [ENTERPRISE LENS]  executed  rows=13  source_table=pass, grain_discipline=pass, governed_thresholds=pass, cross_grain_join=pass
 
-ZERO-TOKEN-MATH GATE PASSED: all 18 cited figure(s) trace to executed results.
+ZERO-TOKEN-MATH GATE PASSED: all 20 cited figure(s) trace to executed results for their lens, and every formatted figure in the prose is cited.
 narrative attempts validated: 1
 
 ==============================================================================
   7. LENS SUMMARIES
 ==============================================================================
-[DEPARTMENT LENS]  The high-value license segment represents long-tenured enterprise agreements driving substantial annual seat revenue.
-  Evaluated at the individual contract level, this segment generates an average license revenue of 8,789.5 compared to the baseline average of 3,221.3. These accounts exhibit exceptional longevity with a mean tenure of 17.5 years versus the baseline of 7.8 years. Highly mature organizations dominate this group, with 42.9% falling in the 20+ organization maturity band compared to 11.8% in the baseline, while small business accounts comprise 0.0% of the segment compared to 41.2% overall.
-  top attributes: license revenue, tenure years, organization maturity band = 20+
+[DEPARTMENT LENS]  The high-value license segment comprises long-tenured, mature accounts generating exceptional single-agreement seat revenue.
+  This segment captures 21 of 119 licenses that meet or exceed the annual seat-license revenue threshold of 5,000.0. These accounts average a license revenue of 8,789.5 compared to the baseline of 3,221.3, and demonstrate a mean tenure of 17.5 years versus 7.8 years across all licenses. Additionally, 0.0% of these licenses belong to small and medium business accounts compared to 41.2% overall.
+  top attributes: license revenue, tenure years, organization tier = smb
 
-[ENTERPRISE LENS]  The top enterprise segment highlights cross-product platform adoption across multi-module account relationships.
-  Evaluated at the parent organization level, high-value accounts deliver a mean consolidated platform revenue of 30,638.3 compared to the baseline average of 13,246.7. These enterprise accounts demonstrate broader platform engagement with an average module count of 8.9 compared to 4.7 across the baseline. Mid-stage organizations lead this category, as 46.2% belong to the 6-10 organization maturity band compared to 24.0% in the baseline, while self-serve deployment accounts for only 15.4% compared to 46.0% overall.
-  top attributes: platform revenue, module count, organization maturity band = 6-10
+[ENTERPRISE LENS]  The consolidated enterprise segment represents broad, multi-product platform relationships heavily supported by direct sales.
+  This segment encompasses 13 of 50 parent organizations that exceed the consolidated platform revenue threshold of 25,000.0. Qualified organizations generate a mean platform revenue of 30,638.3 compared to the baseline of 13,246.7, driven by an average module count of 8.9 versus 4.7 overall. Furthermore, 61.5% of these organizations use direct sales as their deployment channel compared to 38.0% in the baseline, whereas only 7.7% are small and medium business accounts compared to 46.0% across all organizations.
+  top attributes: platform revenue, module count, deployment channel = direct sales
 
 
 ==============================================================================
   8. RECONCILIATION MEMO
 ==============================================================================
-The department lens and enterprise lens surface different account populations because they analyze high value using distinct grains, metrics, and qualification thresholds. The department lens operates at the license contract grain, applying a threshold of annual license revenue of at least 5,000.0 to capture single large seat agreements held by long-tenured clients. In contrast, the enterprise lens operates at the parent organization grain, consolidating platform revenue across seat licenses, API usage, and analytics modules with a threshold of at least 25,000.0 to highlight multi-product organization breadth. Neither lens is incorrect, as they answer different questions for license-level contract tracking versus holistically managed enterprise account strategy.
+The department lens and enterprise lens surface distinct populations because they evaluate account performance through different analytical contracts. The department lens operates at a license grain using single seat-license revenue with a threshold of 5,000.0, highlighting individual high-value contracts and long-tenured software usage. In contrast, the enterprise lens operates at an organization grain using consolidated platform revenue with a threshold of 25,000.0, capturing broad accounts that integrate multiple products such as API and analytics modules. Neither lens is wrong; they simply answer different operational and strategic questions. While the department view identifies key individual license deals for volume-driven teams, the enterprise view reveals total account expansion across the full relationship.
 
 Cited metrics (each verified against executed results):
-  - department lens mean license revenue [department] = 8,789.5
-  - department lens baseline mean license revenue [department] = 3,221.3
-  - department lens mean tenure years [department] = 17.5
-  - department lens baseline mean tenure years [department] = 7.8
-  - department lens organization maturity band = 20+ percentage [department] = 42.9
-  - department lens baseline organization maturity band = 20+ percentage [department] = 11.8
-  - department lens organization tier = smb percentage [department] = 0.0
-  - department lens baseline organization tier = smb percentage [department] = 41.2
-  - department lens license revenue threshold [department] = 5,000.0
-  - enterprise lens mean platform revenue [enterprise] = 30,638.3
-  - enterprise lens baseline mean platform revenue [enterprise] = 13,246.7
-  - enterprise lens mean module count [enterprise] = 8.9
-  - enterprise lens baseline mean module count [enterprise] = 4.7
-  - enterprise lens organization maturity band = 6-10 percentage [enterprise] = 46.2
-  - enterprise lens baseline organization maturity band = 6-10 percentage [enterprise] = 24.0
-  - enterprise lens deployment channel = self serve percentage [enterprise] = 15.4
-  - enterprise lens baseline deployment channel = self serve percentage [enterprise] = 46.0
-  - enterprise lens platform revenue threshold [enterprise] = 25,000.0
+  - department segment license count [department] = 21.0
+  - department total license count [department] = 119.0
+  - department license revenue threshold [department] = 5,000.0
+  - department segment mean license revenue [department] = 8,789.5
+  - department baseline mean license revenue [department] = 3,221.3
+  - department segment mean tenure years [department] = 17.5
+  - department baseline mean tenure years [department] = 7.8
+  - department segment smb tier percentage [department] = 0.0
+  - department baseline smb tier percentage [department] = 41.2
+  - enterprise segment organization count [enterprise] = 13.0
+  - enterprise total organization count [enterprise] = 50.0
+  - enterprise platform revenue threshold [enterprise] = 25,000.0
+  - enterprise segment mean platform revenue [enterprise] = 30,638.3
+  - enterprise baseline mean platform revenue [enterprise] = 13,246.7
+  - enterprise segment mean module count [enterprise] = 8.9
+  - enterprise baseline mean module count [enterprise] = 4.7
+  - enterprise segment direct sales percentage [enterprise] = 61.5
+  - enterprise baseline direct sales percentage [enterprise] = 38.0
+  - enterprise segment smb tier percentage [enterprise] = 7.7
+  - enterprise baseline smb tier percentage [enterprise] = 46.0
 ```

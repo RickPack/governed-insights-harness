@@ -28,9 +28,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from governed_duckdb_tool import (  # noqa: E402
     CitedMetric,
+    FactBase,
     GovernanceViolation,
     GovernedDuckDBTool,
-    numeric_fact_base,
+    build_fact_base,
+    uncited_prose_figures,
     verify_cited_metrics,
 )
 from langchain_context_chain import build_planning_chain, resolve_context  # noqa: E402
@@ -234,8 +236,8 @@ def test_intercepts_cross_grain_join(tool, good_plan):
 
     aggregated = good_plan.enterprise.model_copy(
         update={
-            "sql": "SELECT o.organization_id, l.fee_total FROM organizations o JOIN "
-            "(SELECT organization_id, SUM(license_revenue) AS fee_total FROM licenses GROUP BY organization_id) l "
+            "sql": "SELECT o.organization_id, l.license_total FROM organizations o JOIN "
+            "(SELECT organization_id, SUM(license_revenue) AS license_total FROM licenses GROUP BY organization_id) l "
             "ON l.organization_id = o.organization_id WHERE platform_revenue >= 25000"
         }
     )
@@ -244,40 +246,85 @@ def test_intercepts_cross_grain_join(tool, good_plan):
 
 
 # ---------------------------------------------------------------------------
-# 9–10: zero-token-math gate
+# 9–12: zero-token-math gate
 # ---------------------------------------------------------------------------
 
 
-def test_gate_catches_unverifiable_figure(tool, good_plan):
+@pytest.fixture
+def fact_base(db, context, tool, good_plan) -> FactBase:
+    """The per-lens fact base exactly as the pipeline builds it: row counts, salience statistics, thresholds."""
+    conn, _ = db
+    department_result = tool.execute(good_plan.department)
+    enterprise_result = tool.execute(good_plan.enterprise)
+    return build_fact_base(
+        context,
+        department_result,
+        enterprise_result,
+        compute_salience(conn, DEPARTMENT_CONTRACT, good_plan.department.sql),
+        compute_salience(conn, ENTERPRISE_CONTRACT, good_plan.enterprise.sql),
+    )
+
+
+def test_gate_catches_unverifiable_figure(fact_base):
     """A cited value that no query produced fails the gate, and the failure message names the gate."""
-    results = [tool.execute(good_plan.department), tool.execute(good_plan.enterprise)]
-    facts = numeric_fact_base(results)
     outcome = verify_cited_metrics(
-        [CitedMetric(label="invented mean tenure", lens="department", value=99.9)], facts
+        [CitedMetric(label="invented mean tenure", lens="department", value=99.9)], fact_base
     )
     assert outcome.passed is False
     assert "ZERO-TOKEN-MATH GATE" in outcome.detail
     assert outcome.unverifiable[0].value == 99.9
 
 
-def test_gate_passes_clean_deliverable(db, tool, good_plan):
-    """Figures copied from result sets and salience rankings all trace, so the gate passes."""
-    results = [tool.execute(good_plan.department), tool.execute(good_plan.enterprise)]
+def test_gate_passes_clean_deliverable(db, good_plan, fact_base):
+    """Figures copied from the brief for the right lens all trace, so the gate passes."""
     ranking = compute_salience(db[0], ENTERPRISE_CONTRACT, good_plan.enterprise.sql)
-    facts = numeric_fact_base(results, ranking.numeric_facts())
     module_score = next(s for s in ranking.scores if s.attribute == "module_count")
     cited = [
-        CitedMetric(label="enterprise segment size", lens="enterprise", value=results[1].row_count),
+        CitedMetric(label="enterprise segment size", lens="enterprise", value=ranking.segment_size),
         CitedMetric(label="enterprise mean module count", lens="enterprise", value=module_score.segment_value),
         CitedMetric(label="baseline mean module count", lens="enterprise", value=module_score.baseline_value),
+        CitedMetric(label="enterprise floor", lens="enterprise", value=ENTERPRISE_CONTRACT.thresholds[0].value),
     ]
-    outcome = verify_cited_metrics(cited, facts)
+    prose = (
+        f"Organizations in this segment hold {module_score.segment_value:,.1f} modules against "
+        f"{module_score.baseline_value:,.1f} at baseline, above the {ENTERPRISE_CONTRACT.thresholds[0].value:,.1f} floor."
+    )
+    outcome = verify_cited_metrics(cited, fact_base, prose=prose)
     assert outcome.passed is True
-    assert outcome.checked == 3
+    assert outcome.checked == 4 and outcome.uncited_prose == []
+
+
+def test_gate_rejects_wrong_lens_and_coincidental_values(db, good_plan, fact_base):
+    """A real enterprise figure cited under the department lens fails; so does a fabricated value that
+    merely equals some row's cell, because the fact base holds only what the brief showed the model."""
+    ranking = compute_salience(db[0], ENTERPRISE_CONTRACT, good_plan.enterprise.sql)
+    revenue_score = next(s for s in ranking.scores if s.attribute == "platform_revenue")
+    assert revenue_score.segment_value in fact_base.enterprise
+    wrong_lens = verify_cited_metrics(
+        [CitedMetric(label="platform revenue", lens="department", value=revenue_score.segment_value)], fact_base
+    )
+    assert wrong_lens.passed is False and wrong_lens.unverifiable[0].lens == "department"
+
+    # 14.0 is a tenure_years cell in the license table, but no brief figure. It must not pass.
+    cell_value = db[0].execute("SELECT tenure_years FROM licenses WHERE tenure_years = 14 LIMIT 1").fetchone()
+    assert cell_value is not None
+    coincidence = verify_cited_metrics([CitedMetric(label="tenure", lens="enterprise", value=14.0)], fact_base)
+    assert coincidence.passed is False
+
+
+def test_gate_prose_sweep_catches_uncited_formatted_figure(fact_base):
+    """A formatted figure written into the prose but left out of cited_metrics fails the gate.
+    Plain integers, version strings and category ranges are never flagged."""
+    cited = [CitedMetric(label="department floor", lens="department", value=5000.0)]
+    prose = "Licenses above the 5,000.0 floor average 8,789.5 in revenue (contract v1.2.0, maturity band 6-10, 21 licenses)."
+    assert uncited_prose_figures(prose, cited) == [8789.5]
+    outcome = verify_cited_metrics(cited, fact_base, prose=prose)
+    assert outcome.passed is False and outcome.uncited_prose == [8789.5]
+    assert outcome.unverifiable == []
 
 
 # ---------------------------------------------------------------------------
-# 11: salience against a known fixture
+# 13: salience against a known fixture
 # ---------------------------------------------------------------------------
 
 
@@ -311,6 +358,9 @@ def test_salience_ranking_numeric_and_categorical_fixture():
     assert tenure.method == "cohens_d"
     assert tenure.segment_value == pytest.approx(20.6) and tenure.baseline_value == pytest.approx(15.5)
     assert tenure.direction == "higher" and tenure.effect_size > 0.8
+    assert ranking.lead_insight().startswith(
+        "The most distinctive quality of this segment is deployment channel = direct sales: 100.0% of the segment"
+    )
 
     direct_sales = by_name["deployment_channel = direct_sales"]
     assert direct_sales.method == "percentage_point_delta"
@@ -326,7 +376,7 @@ def test_salience_ranking_numeric_and_categorical_fixture():
 
 
 # ---------------------------------------------------------------------------
-# 12: end-to-end happy path
+# 14: end-to-end happy path
 # ---------------------------------------------------------------------------
 
 
@@ -343,7 +393,7 @@ def test_end_to_end_happy_path(db, fake_planner):
         },
         "enterprise_summary": {
             "headline": "High value organizations are defined by module breadth.",
-            "narrative": "Organizations in this segment use far more modules than baseline.",
+            "narrative": "Organizations in this segment use far more modules than baseline (contract v2.0.0).",
             "top_attributes": ["module_count", "org_tier = enterprise"],
         },
         "reconciliation_memo": "The lenses differ by grain, metric and threshold; neither is wrong.",

@@ -57,12 +57,15 @@ The harness treats the ambiguity as the deliverable rather than as noise to reso
 4. **A governed DuckDB tool validates before it executes.** Grain discipline (ratios divide by `COUNT(DISTINCT entity_id)`), governed
    thresholds only, no cross-grain joins without intermediate aggregation. Every call writes a typed audit record.
 5. **Salience is arithmetic, computed per lens.** For each lens, every profile attribute is scored against that lens's own baseline.
-   Numeric attributes use Cohen's d; categorical attributes use the percentage-point delta at each level. The model receives a ranked
-   list it did not compute and cannot alter.
+   Numeric attributes use Cohen's d; categorical attributes use the percentage-point delta at each level. The top-ranked attribute
+   other than the selection metric becomes a one-sentence lead insight ("the most distinctive quality of this segment is module
+   count: 8.9 vs 4.7 baseline"), rendered from the score, not written by the model. The model receives a ranked list it did not
+   compute and cannot alter.
 6. **A typed agent writes the narrative, and a gate checks it on the way out.** A PydanticAI agent produces a summary per lens, a
    reconciliation memo explaining why the lenses diverge, and a typed `cited_metrics` list. The zero-token-math gate verifies every
-   cited value against the executed results. A failure is sent back to the model as a retry with the failing figures named. If retries
-   run out, the narrative is suppressed and the deterministic tables stand on their own.
+   cited value, for the lens it claims, against the figures the model was actually shown, then confirms every formatted figure in the
+   prose is in that list. A failure is sent back to the model as a retry with the failing figures named. If retries run out, the
+   narrative is suppressed and the deterministic tables stand on their own.
 
 The VP gets both populations side by side, a memo that explains the gap in terms of grain, metric and threshold, a salience table per
 lens showing what makes each population distinctive, and a governance badge saying every number was verified.
@@ -81,10 +84,14 @@ Those are different guarantees. The harness relies on the second kind at every b
   plan to be labelled with its own lens; `GovernedPlan` requires each plan to cite the exact contract id and version the retriever
   resolved. A hallucinated citation stops here.
 - **The narrative cites figures through a typed field, not prose.** `ExecutiveDeliverable.cited_metrics` is a list of
-  `CitedMetric(label, lens, value: float)`. The zero-token-math gate compares typed floats against the union of executed result cells,
-  row counts, salience statistics and governed thresholds. Because it is a comparison of numbers rather than a regular expression over
-  text, a year, a rank or a version number in the prose can never trigger a false positive, and a metric can never hide in the prose
-  unchecked. **The type system is what makes the gate reliable.**
+  `CitedMetric(label, lens, value: float)`. The zero-token-math gate compares each typed float, for the lens it claims, against a
+  `FactBase` holding exactly the figures the model was shown for that lens: segment and baseline sizes, salience statistics and the
+  governed thresholds. Raw result rows are deliberately excluded, because the model never sees rows, so a fabricated value that happens
+  to equal some row's cell is still a fabrication and still fails. Matching is to one decimal place with no relative tolerance. Because
+  the primary check is a comparison of typed numbers rather than a regular expression over text, a year, a rank or a version number in
+  the prose can never trigger a false positive. A second, narrower pass then confirms every executive-formatted figure in the prose
+  (thousands separators or decimals) appears in the typed list, so a number cannot route around the gate by being left out of it.
+  **The type system is what makes the gate exact; the prose sweep is what makes it complete.**
 - **Field descriptions are the model's instructions.** Every field on every model carries `Field(description=...)`. Those descriptions
   are what the model reads through structured output binding, so the schema and the prompt cannot drift apart.
 
@@ -207,8 +214,9 @@ producing `DualLensPlan` and producing `ExecutiveDeliverable`. Everything betwee
 | `executive_render.py` | HTML rendering of a run for the notebook. |
 | `run_demo.py` | Prints every stage of one run in order. |
 | `build_notebook.py` | Generates the Colab notebook with nbformat and validates it. |
-| `governed_insights_langchain.ipynb` | The guided tour. Generated; do not hand-edit. |
-| `tests/test_pipeline.py` | Twelve cases, models mocked at the boundary, no network, no key. |
+| `execute_notebook.py` | Regenerates, executes, verifies and date-stamps the notebook so GitHub shows real outputs. |
+| `governed_insights_langchain.ipynb` | The guided tour, committed with executed outputs. Generated; do not hand-edit. |
+| `tests/test_pipeline.py` | Fourteen cases, models mocked at the boundary, no network, no key. |
 
 ## Quickstart
 
@@ -223,6 +231,10 @@ python -m pytest tests -q
 # The live demo needs a Gemini key.
 export GOOGLE_API_KEY="your-key"        # PowerShell: setx GOOGLE_API_KEY "your-key", then reopen the shell
 python run_demo.py
+
+# Refresh the committed notebook's outputs (regenerate, execute, verify, date-stamp).
+# The notebook execution packages are pinned in requirements.txt alongside everything else.
+python execute_notebook.py
 ```
 
 Or open the notebook in Colab with the badge above and store the key as a Colab secret named `GOOGLE_API_KEY`.
@@ -233,7 +245,8 @@ result sets, both salience rankings, the validator and gate outcomes, both lens 
 ## Sample run
 
 This is real output from `python run_demo.py`, captured 2026-09-18 against Gemini (`gemini-3.6-flash`), seed 42. Full captured
-output, unedited apart from stripping two SDK log lines, is in [SAMPLE_RUN.md](SAMPLE_RUN.md).
+output, unedited apart from stripping two SDK log lines, is in [SAMPLE_RUN.md](SAMPLE_RUN.md). The committed notebook carries
+the same run's outputs, date-stamped, so the numbers are visible on GitHub without opening Colab.
 
 | | Department lens | Enterprise lens |
 |---|---|---|
@@ -242,16 +255,16 @@ output, unedited apart from stripping two SDK log lines, is in [SAMPLE_RUN.md](S
 | Governed floor | 5,000.0 | 25,000.0 |
 | Segment mean metric | 8,789.5 | 30,638.3 |
 | Baseline mean metric | 3,221.3 | 13,246.7 |
-| Top differentiator | Tenure: 17.5 yrs vs 7.8 yrs baseline (Cohen's d 1.56) | Module count: 8.9 vs 4.7 baseline (Cohen's d 1.37) |
-| Zero-token-math gate | Passed, 18/18 cited figures verified, 1 attempt | Passed, 18/18 cited figures verified, 1 attempt |
+| Lead insight (computed, not written) | Tenure: 17.5 yrs vs 7.8 yrs baseline (Cohen's d +1.55) | Module count: 8.9 vs 4.7 baseline (Cohen's d +1.37) |
+| Zero-token-math gate | Passed: 20 of 20 cited figures traced for their lens, prose fully cited, 1 attempt | Same run, same gate |
 
-**Reconciliation memo (verbatim from the run):** "The department lens and enterprise lens surface different account populations
-because they analyze high value using distinct grains, metrics, and qualification thresholds. The department lens operates at the
-license contract grain, applying a threshold of annual license revenue of at least 5,000.0 to capture single large seat agreements
-held by long-tenured clients. In contrast, the enterprise lens operates at the parent organization grain, consolidating platform
-revenue across seat licenses, API usage, and analytics modules with a threshold of at least 25,000.0 to highlight multi-product
-organization breadth. Neither lens is incorrect, as they answer different questions for license-level contract tracking versus
-holistically managed enterprise account strategy."
+**Reconciliation memo (verbatim from the run):** "The department lens and enterprise lens surface distinct populations because they
+evaluate account performance through different analytical contracts. The department lens operates at a license grain using single
+seat-license revenue with a threshold of 5,000.0, highlighting individual high-value contracts and long-tenured software usage. In
+contrast, the enterprise lens operates at an organization grain using consolidated platform revenue with a threshold of 25,000.0,
+capturing broad accounts that integrate multiple products such as API and analytics modules. Neither lens is wrong; they simply
+answer different operational and strategic questions. While the department view identifies key individual license deals for
+volume-driven teams, the enterprise view reveals total account expansion across the full relationship."
 
 Numbers depend on the random seed and on what the model plans and writes, so a different run (or a different question) will not
 reproduce these exactly. To generate a fresh run yourself, open the notebook in Colab using the badge at the top of this file, or
@@ -259,7 +272,7 @@ run `python run_demo.py` locally with `GOOGLE_API_KEY` set, as described in Quic
 
 ## What the tests prove
 
-Twelve cases in `tests/test_pipeline.py`, all passing with no network access and no API key present. The planner is mocked with a
+Fourteen cases in `tests/test_pipeline.py`, all passing with no network access and no API key present. The planner is mocked with a
 `FakeListChatModel` subclass whose `with_structured_output` returns a real Runnable, so LCEL composition with the pipe operator is
 exercised for real. The narrative model is PydanticAI's `TestModel`. Nothing else is mocked.
 
@@ -267,8 +280,13 @@ exercised for real. The narrative model is PydanticAI's `TestModel`. Nothing els
 - A contract with a grain error, a blank metric or a non-semantic version cannot be constructed.
 - The chain composes and parses structured output; malformed model output fails at the Pydantic boundary.
 - The validator rejects raw-row-count denominators, ungoverned thresholds and unaggregated cross-grain joins, and accepts an aggregated join.
-- The gate catches an unverifiable figure and passes a clean deliverable.
-- Salience against a hand-built fixture uses Cohen's d for numeric and percentage points for categorical attributes, and ranks by absolute effect.
+- The gate catches a fabricated figure and passes a clean deliverable whose prose and typed list agree.
+- The gate rejects a real enterprise figure cited under the department lens, and rejects a fabricated value that merely equals some
+  row's cell, because the fact base holds only what the brief showed the model.
+- The gate's prose sweep catches a formatted figure written into the narrative but left out of `cited_metrics`, while ignoring plain
+  integers, version strings and category ranges.
+- Salience against a hand-built fixture uses Cohen's d for numeric and percentage points for categorical attributes, ranks by absolute
+  effect, and renders the lead insight from the top score.
 - The end-to-end path produces both summaries, a memo, a passing gate and a complete audit trail.
 
 ## Design decisions worth knowing
@@ -278,8 +296,16 @@ exercised for real. The narrative model is PydanticAI's `TestModel`. Nothing els
 - **Categorical salience carries Cohen's h alongside the percentage-point delta.** The delta is what a reader understands. Cohen's h is
   the arcsine-transformed proportion difference, on the same standardised scale as Cohen's d, so a category level and a numeric
   attribute can be ranked in one list.
-- **The gate's fact base includes governed thresholds.** A narrative that mentions the 5,000.0 floor is citing a versioned contract,
-  not inventing a number. Thresholds are deterministic facts and belong in the base.
+- **The gate's fact base is the brief, nothing more.** It holds, per lens, the segment and baseline sizes, the salience statistics
+  and the governed thresholds: exactly what the model was shown. A narrative that mentions the 5,000.0 floor is citing a versioned
+  contract, not inventing a number. Raw result rows are excluded because the model never saw them. Matching is to one decimal
+  place with no relative tolerance, because one part in a thousand of a five-figure revenue is room for a fabricated number.
+- **The lead insight skips the selection metric.** A segment selected for high revenue has high revenue by construction. The
+  sentence a product leader repeats is the attribute that differs *given* the selection: tenure for the license lens, module
+  count for the organization lens.
+- **The committed notebook is executed, and says so.** `execute_notebook.py` regenerates the notebook, runs every cell with a fresh
+  kernel, refuses to proceed on any error, and inserts a dated note naming the model. A reader on GitHub sees real numbers and
+  knows which run produced them.
 - **Fail closed, twice.** An unmatched question is refused. A narrative that cannot be verified is suppressed. In both cases the
   system prefers to say less rather than to say something it cannot trace.
 

@@ -54,7 +54,7 @@ class _Archetype:
     name: str
     count: int
     licenses_range: tuple[int, int]
-    license_fee_range: tuple[float, float]      # per-license annual seat-license revenue
+    license_revenue_range: tuple[float, float]      # per-license annual seat-license revenue
     api_usage_range: tuple[float, float]        # organization-level API usage revenue
     analytics_range: tuple[float, float]        # organization-level analytics module revenue
     tenure_range: tuple[int, int]
@@ -70,7 +70,7 @@ _ARCHETYPES: tuple[_Archetype, ...] = (
         name="concentrated",
         count=9,
         licenses_range=(1, 2),
-        license_fee_range=(5_800, 13_500),
+        license_revenue_range=(5_800, 13_500),
         api_usage_range=(0, 2_500),
         analytics_range=(0, 1_500),
         tenure_range=(16, 32),
@@ -82,7 +82,7 @@ _ARCHETYPES: tuple[_Archetype, ...] = (
         name="breadth",
         count=10,
         licenses_range=(4, 6),
-        license_fee_range=(1_800, 4_600),
+        license_revenue_range=(1_800, 4_600),
         api_usage_range=(8_000, 15_000),
         analytics_range=(3_000, 7_500),
         tenure_range=(6, 15),
@@ -94,7 +94,7 @@ _ARCHETYPES: tuple[_Archetype, ...] = (
         name="both",
         count=4,
         licenses_range=(2, 3),
-        license_fee_range=(4_000, 9_500),
+        license_revenue_range=(4_000, 9_500),
         api_usage_range=(5_000, 12_000),
         analytics_range=(2_000, 6_000),
         tenure_range=(10, 22),
@@ -106,7 +106,7 @@ _ARCHETYPES: tuple[_Archetype, ...] = (
         name="mass",
         count=27,
         licenses_range=(1, 3),
-        license_fee_range=(250, 2_400),
+        license_revenue_range=(250, 2_400),
         api_usage_range=(0, 1_800),
         analytics_range=(0, 1_200),
         tenure_range=(1, 12),
@@ -163,18 +163,18 @@ def _generate_frames(seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
             organization_tenure = rng.randint(*archetype.tenure_range)
 
             n_licenses = rng.randint(*archetype.licenses_range)
-            organization_fee_total = 0.0
+            organization_license_total = 0.0
             organization_modules = 0
             for _ in range(n_licenses):
                 license_counter += 1
-                fee = round(rng.uniform(*archetype.license_fee_range), 2)
+                revenue = round(rng.uniform(*archetype.license_revenue_range), 2)
                 # Breadth organizations attach more modules per license by construction.
                 modules = rng.randint(2, 3) if archetype.name in ("breadth", "both") else rng.randint(1, 2)
                 licenses.append(
                     {
                         "license_id": f"L{license_counter:04d}",
                         "organization_id": organization_id,
-                        "license_revenue": fee,
+                        "license_revenue": revenue,
                         "org_maturity_band": maturity_band,
                         # License tenure never exceeds the relationship tenure.
                         "tenure_years": max(1, organization_tenure - rng.randint(0, 4)),
@@ -183,7 +183,7 @@ def _generate_frames(seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
                         "org_tier": org_tier,
                     }
                 )
-                organization_fee_total += fee
+                organization_license_total += revenue
                 organization_modules += modules
 
             api_usage = round(rng.uniform(*archetype.api_usage_range), 2)
@@ -193,11 +193,11 @@ def _generate_frames(seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
                     "organization_id": organization_id,
                     "archetype": archetype.name,
                     "license_count": n_licenses,
-                    "license_revenue_total": round(organization_fee_total, 2),
+                    "license_revenue_total": round(organization_license_total, 2),
                     "api_usage_revenue": api_usage,
                     "analytics_module_revenue": analytics,
                     # Materialised so the organization contract reads one table at one grain.
-                    "platform_revenue": round(organization_fee_total + api_usage + analytics, 2),
+                    "platform_revenue": round(organization_license_total + api_usage + analytics, 2),
                     "org_maturity_band": maturity_band,
                     "tenure_years": organization_tenure,
                     "module_count": organization_modules,

@@ -41,7 +41,13 @@ from pydantic_ai import Agent, ModelRetry, RunContext  # noqa: E402
 from pydantic_ai.exceptions import UnexpectedModelBehavior  # noqa: E402
 from pydantic_ai.models import Model  # noqa: E402
 
-from governed_duckdb_tool import CitedMetric, ExecutionResult, GateOutcome, verify_cited_metrics  # noqa: E402
+from governed_duckdb_tool import (  # noqa: E402
+    CitedMetric,
+    ExecutionResult,
+    FactBase,
+    GateOutcome,
+    verify_cited_metrics,
+)
 from salience import SalienceRanking  # noqa: E402
 from semantic_contracts import ResolvedContext  # noqa: E402
 
@@ -89,6 +95,18 @@ class ExecutiveDeliverable(BaseModel):
             "from the verified results. This list is checked by the zero-token-math gate."
         )
     )
+
+    def prose(self) -> str:
+        """All narrative text in one string, so the gate can confirm every formatted figure in it is cited."""
+        return "\n".join(
+            [
+                self.department_summary.headline,
+                self.department_summary.narrative,
+                self.enterprise_summary.headline,
+                self.enterprise_summary.narrative,
+                self.reconciliation_memo,
+            ]
+        )
 
 
 class NarrativeOutcome(BaseModel):
@@ -148,7 +166,7 @@ class NarrativeBrief(BaseModel):
 class NarrativeDeps:
     """Dependencies injected into the run: the fact base the gate checks against, and a place to keep the last outcome."""
 
-    fact_base: list[float]
+    fact_base: FactBase
     attempts: int = 0
     last_gate: GateOutcome | None = None
     gate_log: list[GateOutcome] = field(default_factory=list)
@@ -158,9 +176,11 @@ _INSTRUCTIONS = (
     "You are writing an executive comparison for a product and revenue leadership audience. "
     "You will receive a brief containing two verified result sets and two salience rankings. "
     "You write; you never compute. Every number you mention must be copied from the brief "
-    "exactly as written, and every number you mention must also appear in cited_metrics with the "
-    "correct lens. Do not derive new figures (no differences, ratios, or totals of your own). "
-    "Format figures with thousands separators and one decimal place. Never use the dollar sign or "
+    "exactly as written, and every number you mention must also appear in cited_metrics under the "
+    "lens whose section of the brief it came from. Do not derive new figures (no differences, "
+    "ratios, or totals of your own). "
+    "Write measured figures (revenue, means, percentages) with thousands separators and one decimal "
+    "place; write counts of licenses or organizations as whole numbers. Never use the dollar sign or "
     "underscores in prose; write attribute names as plain words. "
     "Explain the divergence between lenses in terms of grain, metric, and threshold."
 )
@@ -180,11 +200,15 @@ def build_narrative_agent(model: Model | str | None = None, retries: int = DEFAU
     def zero_token_math_gate(ctx: RunContext[NarrativeDeps], output: ExecutiveDeliverable) -> ExecutiveDeliverable:
         """ZERO-TOKEN-MATH GATE as a validator: a failing deliverable is sent back to the model with the failing figures named."""
         ctx.deps.attempts += 1
-        outcome = verify_cited_metrics(output.cited_metrics, ctx.deps.fact_base)
+        outcome = verify_cited_metrics(output.cited_metrics, ctx.deps.fact_base, prose=output.prose())
         ctx.deps.last_gate = outcome
         ctx.deps.gate_log.append(outcome)
         if not outcome.passed:
-            raise ModelRetry(outcome.detail + " Correct the cited_metrics to values that appear in the brief.")
+            raise ModelRetry(
+                outcome.detail
+                + " Every figure must be copied from the brief for the lens it belongs to, and every "
+                "formatted figure in the prose must also appear in cited_metrics."
+            )
         return output
 
     return agent
@@ -192,7 +216,7 @@ def build_narrative_agent(model: Model | str | None = None, retries: int = DEFAU
 
 def synthesize_narrative(
     brief: NarrativeBrief,
-    fact_base: list[float],
+    fact_base: FactBase,
     model: Model | str | None = None,
     retries: int = DEFAULT_OUTPUT_RETRIES,
 ) -> NarrativeOutcome:
@@ -205,7 +229,7 @@ def synthesize_narrative(
         raise EnvironmentError("GOOGLE_API_KEY is not set; cannot run the narrative agent.")
 
     agent = build_narrative_agent(model=model, retries=retries)
-    deps = NarrativeDeps(fact_base=list(fact_base))
+    deps = NarrativeDeps(fact_base=fact_base)
     try:
         run = agent.run_sync(brief.render(), deps=deps)
     except UnexpectedModelBehavior:

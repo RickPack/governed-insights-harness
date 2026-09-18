@@ -72,6 +72,19 @@ class SalienceScore(BaseModel):
     def display_name(self) -> str:
         return self.attribute if self.level is None else f"{self.attribute} = {self.level}"
 
+    def as_insight(self) -> str:
+        """The score as one sentence a product leader would repeat, with no underscores or currency symbols."""
+        name = self.display_name.replace("_", " ")
+        if self.method == "cohens_d":
+            return (
+                f"{name}: {self.segment_value:,.1f} vs {self.baseline_value:,.1f} baseline "
+                f"({self.direction}; Cohen's d {self.effect_size:+.2f})"
+            )
+        return (
+            f"{name}: {self.segment_value:,.1f}% of the segment vs {self.baseline_value:,.1f}% of baseline "
+            f"({self.direction}; {self.raw_difference:+,.1f} points)"
+        )
+
 
 class SalienceRanking(BaseModel):
     """All scores for one lens, ordered by absolute effect size, most distinctive first."""
@@ -79,12 +92,25 @@ class SalienceRanking(BaseModel):
     lens: Lens = Field(description="Lens the ranking belongs to.")
     contract_id: str = Field(description="Contract that defined the segment.")
     contract_version: str = Field(description="Version of that contract.")
+    selection_metric: str = Field(description="The contract's metric column. Excluded from the lead insight because the segment was selected on it.")
     segment_size: int = Field(description="Distinct entities in the segment.")
     baseline_size: int = Field(description="Distinct entities in the baseline (the full grain).")
     scores: list[SalienceScore] = Field(description="Scores sorted by absolute effect size, descending.")
 
     def top(self, n: int = 5) -> list[SalienceScore]:
         return self.scores[:n]
+
+    def lead_insight(self) -> str:
+        """One deterministic sentence naming what most distinguishes this segment. No model involved.
+
+        The selection metric is skipped: a segment chosen for high revenue has
+        high revenue by construction, and saying so is not an insight. What a
+        product leader wants is the attribute that differs *given* the selection.
+        """
+        candidates = [s for s in self.scores if s.attribute != self.selection_metric]
+        if not candidates:
+            return "No attributes beyond the selection metric were scored."
+        return f"The most distinctive quality of this segment is {candidates[0].as_insight()}."
 
     def numeric_facts(self) -> list[float]:
         """Every number in the ranking, so the zero-token-math gate can verify figures the narrative cites."""
@@ -109,10 +135,14 @@ def cohens_d(mean_s: float, sd_s: float, n_s: int, mean_b: float, sd_b: float, n
     return (mean_s - mean_b) / math.sqrt(pooled_var)
 
 
+def _clamp_proportion(p: float) -> float:
+    """Guard against float drift pushing a share a hair outside [0, 1] before asin."""
+    return min(1.0, max(0.0, p))
+
+
 def cohens_h(p_s: float, p_b: float) -> float:
     """Arcsine-transformed difference in proportions; the standardised analogue of Cohen's d for shares."""
-    clamp = lambda p: min(1.0, max(0.0, p))  # noqa: E731 — tiny inline guard against float drift
-    return 2 * math.asin(math.sqrt(clamp(p_s))) - 2 * math.asin(math.sqrt(clamp(p_b)))
+    return 2 * math.asin(math.sqrt(_clamp_proportion(p_s))) - 2 * math.asin(math.sqrt(_clamp_proportion(p_b)))
 
 
 def _direction(effect: float) -> Direction:
@@ -153,17 +183,18 @@ def _numeric_score(
         FROM {table} AS b
     """
     seg_mean, seg_sd, seg_n, base_mean, base_sd, base_n = conn.execute(sql).fetchone()
-    seg_mean, base_mean = round(float(seg_mean), 1), round(float(base_mean), 1)
+    # Effect size is computed on the unrounded statistics; rounding happens only
+    # on the reported values, so the ranking never inherits presentation error.
     d = cohens_d(float(seg_mean), float(seg_sd or 0.0), int(seg_n), float(base_mean), float(base_sd or 0.0), int(base_n))
-    d = round(d, 2)
+    seg_reported, base_reported = round(float(seg_mean), 1), round(float(base_mean), 1)
     return SalienceScore(
         attribute=attribute,
         level=None,
         method="cohens_d",
-        segment_value=seg_mean,
-        baseline_value=base_mean,
-        raw_difference=round(seg_mean - base_mean, 1),
-        effect_size=d,
+        segment_value=seg_reported,
+        baseline_value=base_reported,
+        raw_difference=round(seg_reported - base_reported, 1),
+        effect_size=round(d, 2),
         direction=_direction(d),
     )
 
@@ -193,9 +224,9 @@ def _categorical_scores(
     """
     scores: list[SalienceScore] = []
     for level, seg_share, base_share in conn.execute(sql).fetchall():
-        seg_pct = round(float(seg_share or 0.0) * 100, 1)
-        base_pct = round(float(base_share or 0.0) * 100, 1)
-        h = round(cohens_h(seg_pct / 100, base_pct / 100), 2)
+        seg_share, base_share = float(seg_share or 0.0), float(base_share or 0.0)
+        h = cohens_h(seg_share, base_share)
+        seg_pct, base_pct = round(seg_share * 100, 1), round(base_share * 100, 1)
         scores.append(
             SalienceScore(
                 attribute=attribute,
@@ -204,7 +235,7 @@ def _categorical_scores(
                 segment_value=seg_pct,
                 baseline_value=base_pct,
                 raw_difference=round(seg_pct - base_pct, 1),
-                effect_size=h,
+                effect_size=round(h, 2),
                 direction=_direction(h),
             )
         )
@@ -247,6 +278,7 @@ def compute_salience(
         lens=contract.lens,
         contract_id=contract.contract_id,
         contract_version=contract.version,
+        selection_metric=contract.metric_expression,
         segment_size=int(segment_size),
         baseline_size=int(baseline_size),
         scores=scores,

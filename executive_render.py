@@ -46,6 +46,7 @@ _CSS = """
 .gih .lens h3 { margin: .3rem 0 .5rem 0; font-size: 1.05rem; }
 .gih .lens .meta { color: #6b7280; font-size: .85rem; margin-bottom: .6rem; }
 .gih .lens .meta b { color: #374151; }
+.gih .lens .insight { margin: .2rem 0 .6rem 0; padding: .5rem .7rem; background: #f9fafb; border-left: 3px solid #9ca3af; font-weight: 600; font-size: .95rem; }
 .gih table.cmp { width: 100%; border-collapse: collapse; margin: 1.25rem 0; font-size: .92rem; }
 .gih table.cmp th, .gih table.cmp td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid #e5e7eb; vertical-align: top; }
 .gih table.cmp th { background: #f9fafb; font-weight: 600; color: #374151; }
@@ -97,6 +98,8 @@ def _lens_card(run: PipelineRun, lens: str) -> str:
     headline = _plain(summary.headline) if summary else _plain(f"{ranking.segment_size} of {ranking.baseline_size} {contract.entity_grain}s selected")
     narrative = f"<p>{_plain(summary.narrative)}</p>" if summary else ""
     threshold = contract.thresholds[0]
+    # The lead insight is computed, not written: it is the top salience score as a sentence.
+    insight = f'<p class="insight">{escape(ranking.lead_insight())}</p>'
     return (
         f'<div class="lens {css}"><div class="tag">{title}</div>'
         f"<h3>{headline}</h3>"
@@ -105,7 +108,7 @@ def _lens_card(run: PipelineRun, lens: str) -> str:
         f"<b>Floor:</b> {money(threshold.value)} &nbsp;·&nbsp; "
         f"<b>Contract:</b> {_plain(contract.contract_id)} v{contract.version}<br>"
         f"<b>Segment:</b> {ranking.segment_size} of {ranking.baseline_size} {contract.entity_grain}s</div>"
-        f"{narrative}</div>"
+        f"{insight}{narrative}</div>"
     )
 
 
@@ -143,7 +146,7 @@ def _salience_table(ranking: SalienceRanking, top_n: int = 8) -> str:
         method = "Cohen's d" if s.method == "cohens_d" else "pp delta"
         rank_class = f"rank{i}" if i <= 2 else ""
         return (
-            f'<tr class="{rank_class}"><td>{_plain(s.display_name)}</td>'
+            f'<tr class="{rank_class}"><td style="color:#9ca3af">{i}</td><td>{_plain(s.display_name)}</td>'
             f"<td>{money(s.segment_value)}{unit}</td><td>{money(s.baseline_value)}{unit}</td>"
             f'<td><span class="bar {s.direction}" style="width:{width}px"></span>{s.effect_size:+.2f}</td>'
             f'<td><span class="dir {s.direction}">{arrow}</span></td>'
@@ -155,7 +158,7 @@ def _salience_table(ranking: SalienceRanking, top_n: int = 8) -> str:
     body = "".join(row(i, s) for i, s in enumerate(scores, start=1))
     return (
         f'<div class="lens" style="border-top-color:{color}"><div class="tag" style="color:{color}">{title} · what makes this segment distinctive</div>'
-        '<table class="sal"><thead><tr><th>Attribute</th><th>Segment</th><th>Baseline</th>'
+        '<table class="sal"><thead><tr><th>#</th><th>Attribute</th><th>Segment</th><th>Baseline</th>'
         "<th>Effect size</th><th>Direction</th><th>Method</th></tr></thead>"
         f"<tbody>{body}</tbody></table></div>"
     )
