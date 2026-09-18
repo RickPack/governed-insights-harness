@@ -1,0 +1,23 @@
+# Interview preparation material must never reach the public repository.
+interview_materials/
+
+# Secrets and local environment
+.env
+.env.*
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Notebook and editor noise
+.ipynb_checkpoints/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
