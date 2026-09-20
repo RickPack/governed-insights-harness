@@ -208,6 +208,141 @@ def _generate_frames(seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     return pd.DataFrame(licenses), pd.DataFrame(organizations)
 
+PERIOD = "2025-Q4"
+
+# Movement mix for the decomposition tables. Drawn from a SEPARATE generator
+# (seed + 1) so the licenses and organizations tables stay byte-identical.
+_NEW_SHARE = 0.10
+_EXPANSION_SHARE = 0.30
+_CONTRACTION_SHARE = 0.15
+_INTERNAL_MIGRATIONS = 2
+_CROSS_ORG_MIGRATIONS = 2
+_MISSING_DESTINATION_MIGRATIONS = 1
+_CHURNED_LICENSES = 6
+
+
+def _generate_movements(seed: int, licenses_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build license_snapshots and license_movements for one period.
+
+    end_revenue is the existing licenses.license_revenue. begin_revenue is
+    derived from independently drawn movement events, so snapshots and events
+    are two separate inputs that a reconciliation gate can genuinely compare.
+    Churned licenses exist only in the snapshots (they have left the current
+    book, so they are absent from `licenses`), which is why snapshots carry
+    organization_id.
+
+    On a migration, the OUT row sits on the source license and the IN row on the
+    destination license. `destination_license_id` always holds the COUNTERPARTY
+    license: the destination on an OUT row, the source on an IN row.
+    """
+    rng = random.Random(seed + 1)
+    rows = licenses_df[["license_id", "organization_id", "license_revenue"]].to_dict("records")
+    end = {r["license_id"]: float(r["license_revenue"]) for r in rows}
+    org_of = {r["license_id"]: r["organization_id"] for r in rows}
+    net: dict[str, float] = {lid: 0.0 for lid in end}  # begin = end - net
+    movements: list[dict] = []
+
+    def add(license_id: str, kind: str, amount: float, counterparty: str | None = None) -> None:
+        movements.append(
+            {
+                "movement_id": f"M{len(movements) + 1:04d}",
+                "license_id": license_id,
+                "period": PERIOD,
+                "movement_type": kind,
+                "amount": amount,
+                "destination_license_id": counterparty,
+            }
+        )
+
+    new_ids: set[str] = set()
+    for lid in end:
+        draw = rng.random()
+        if draw < _NEW_SHARE:
+            add(lid, "NEW", end[lid])
+            net[lid] = end[lid]
+            new_ids.add(lid)
+        elif draw < _NEW_SHARE + _EXPANSION_SHARE:
+            amount = round(end[lid] * rng.uniform(0.05, 0.30), 2)
+            add(lid, "EXPANSION", amount)
+            net[lid] += amount
+        elif draw < _NEW_SHARE + _EXPANSION_SHARE + _CONTRACTION_SHARE:
+            amount = round(end[lid] * rng.uniform(0.05, 0.25), 2)
+            add(lid, "CONTRACTION", amount)
+            net[lid] -= amount
+
+    # Migrations move revenue between licenses that existed at the start of the
+    # period. Each source and destination is used once.
+    eligible = [lid for lid in end if lid not in new_ids]
+    rng.shuffle(eligible)
+    by_org: dict[str, list[str]] = {}
+    for lid in eligible:
+        by_org.setdefault(org_of[lid], []).append(lid)
+    used: set[str] = set()
+
+    def take_pair(same_org: bool) -> tuple[str, str] | None:
+        for lid in eligible:
+            if lid in used:
+                continue
+            for other in eligible:
+                if other == lid or other in used:
+                    continue
+                if (org_of[lid] == org_of[other]) == same_org:
+                    return lid, other
+        return None
+
+    def migrate(source: str, dest: str | None) -> None:
+        amount = round(rng.uniform(0.05, 0.20) * min(end[source], end[dest] if dest else end[source]), 2)
+        add(source, "MIGRATION_OUT", amount, dest)
+        net[source] -= amount
+        if dest is not None:
+            add(dest, "MIGRATION_IN", amount, source)
+            net[dest] += amount
+
+    for _ in range(_INTERNAL_MIGRATIONS):
+        pair = take_pair(same_org=True)
+        if pair:
+            used.update(pair)
+            migrate(*pair)
+    for _ in range(_CROSS_ORG_MIGRATIONS):
+        pair = take_pair(same_org=False)
+        if pair:
+            used.update(pair)
+            migrate(*pair)
+    for _ in range(_MISSING_DESTINATION_MIGRATIONS):
+        source = next((lid for lid in eligible if lid not in used), None)
+        if source:
+            used.add(source)
+            migrate(source, None)  # revenue left to an unknown destination
+
+    snapshots = [
+        {
+            "license_id": lid,
+            "organization_id": org_of[lid],
+            "period": PERIOD,
+            "begin_revenue": round(end[lid] - net[lid], 2),
+            "end_revenue": end[lid],
+        }
+        for lid in end
+    ]
+
+    # Churned licenses: positive begin revenue, zero end revenue.
+    organization_ids = sorted(set(org_of.values()))
+    for index in range(1, _CHURNED_LICENSES + 1):
+        lid = f"LX{index:03d}"
+        begin = round(rng.uniform(1_500, 9_000), 2)
+        snapshots.append(
+            {
+                "license_id": lid,
+                "organization_id": rng.choice(organization_ids),
+                "period": PERIOD,
+                "begin_revenue": begin,
+                "end_revenue": 0.0,
+            }
+        )
+        add(lid, "CHURN", begin)
+
+    return pd.DataFrame(snapshots), pd.DataFrame(movements)
+
 
 def build_database(seed: int = 42, verbose: bool = True) -> tuple[duckdb.DuckDBPyConnection, TierSummary]:
     """Create an in-memory DuckDB with `licenses` and `organizations` tables.
@@ -226,6 +361,33 @@ def build_database(seed: int = 42, verbose: bool = True) -> tuple[duckdb.DuckDBP
     conn.execute("CREATE TABLE organizations AS SELECT * FROM organizations_src")
     conn.unregister("licenses_src")
     conn.unregister("organizations_src")
+
+    # Period-over-period decomposition inputs (see decomposition.py). Keyed by period
+    # so further periods can be added later.
+    snapshots_df, movements_df = _generate_movements(seed, licenses_df)
+    conn.execute(
+        """
+        CREATE TABLE license_snapshots (
+          license_id VARCHAR NOT NULL, organization_id VARCHAR NOT NULL, period VARCHAR NOT NULL,
+          begin_revenue DOUBLE NOT NULL, end_revenue DOUBLE NOT NULL,
+          PRIMARY KEY (license_id, period))
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE license_movements (
+          movement_id VARCHAR NOT NULL PRIMARY KEY, license_id VARCHAR NOT NULL, period VARCHAR NOT NULL,
+          movement_type VARCHAR NOT NULL,
+          amount DOUBLE NOT NULL,
+          destination_license_id VARCHAR)
+        """
+    )
+    conn.register("snapshots_src", snapshots_df)
+    conn.register("movements_src", movements_df)
+    conn.execute("INSERT INTO license_snapshots SELECT license_id, organization_id, period, begin_revenue, end_revenue FROM snapshots_src")
+    conn.execute("INSERT INTO license_movements SELECT movement_id, license_id, period, movement_type, amount, destination_license_id FROM movements_src")
+    conn.unregister("snapshots_src")
+    conn.unregister("movements_src")
 
     summary = TierSummary(
         organizations=len(organizations_df),
