@@ -1,6 +1,3 @@
-# Interview preparation material must never reach the public repository.
-interview_materials/
-
 # Secrets and local environment
 .env
 .env.*
