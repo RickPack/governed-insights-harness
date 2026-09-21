@@ -22,6 +22,7 @@ from langchain_core.language_models import BaseChatModel
 from pydantic import BaseModel, Field
 from pydantic_ai.models import Model
 
+from decomposition import LensDecomposition, decompose
 from governed_duckdb_tool import (
     AuditRecord,
     ExecutionResult,
@@ -46,6 +47,8 @@ class PipelineRun(BaseModel):
     enterprise_result: ExecutionResult = Field(description="Executed enterprise-lens result set.")
     department_salience: SalienceRanking = Field(description="Salience ranking for the department lens.")
     enterprise_salience: SalienceRanking = Field(description="Salience ranking for the enterprise lens.")
+    department_decomposition: LensDecomposition = Field(description="Reconciled revenue movement, department lens.")
+    enterprise_decomposition: LensDecomposition = Field(description="Reconciled revenue movement, enterprise lens.")
     audit_trail: list[AuditRecord] = Field(description="One record per tool call.")
     gate: GateOutcome = Field(description="Final zero-token-math gate outcome.")
     deliverable: ExecutiveDeliverable | None = Field(description="Verified narrative, or None if suppressed.")
@@ -97,6 +100,11 @@ def run_dual_lens_pipeline(
         conn, governed_plan.context.enterprise_contract, governed_plan.plan.enterprise.sql
     )
 
+    # 3b. Revenue movement per lens. Deterministic; raises ReconciliationError (a
+    # GovernanceViolation) before any narration if components do not add up.
+    department_decomposition = decompose(conn, "department")
+    enterprise_decomposition = decompose(conn, "enterprise")
+
     # 4. Synthesise, with the zero-token-math gate as the output validator.
     # The fact base is exactly what the brief shows the model, per lens: row
     # counts, salience statistics, and the governed thresholds of each contract.
@@ -106,6 +114,8 @@ def run_dual_lens_pipeline(
         enterprise_result,
         department_salience,
         enterprise_salience,
+        department_decomposition,
+        enterprise_decomposition,
     )
     brief = NarrativeBrief(
         context=governed_plan.context,
@@ -113,6 +123,8 @@ def run_dual_lens_pipeline(
         enterprise_result=enterprise_result,
         department_salience=department_salience,
         enterprise_salience=enterprise_salience,
+        department_decomposition=department_decomposition,
+        enterprise_decomposition=enterprise_decomposition,
     )
     narrative = synthesize_narrative(brief, fact_base, model=narrative_model)
 
@@ -124,6 +136,8 @@ def run_dual_lens_pipeline(
         enterprise_result=enterprise_result,
         department_salience=department_salience,
         enterprise_salience=enterprise_salience,
+        department_decomposition=department_decomposition,
+        enterprise_decomposition=enterprise_decomposition,
         audit_trail=tool.audit_trail,
         gate=narrative.gate,
         deliverable=narrative.deliverable,

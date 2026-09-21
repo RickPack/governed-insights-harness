@@ -26,6 +26,7 @@ from pydantic_ai.models.test import TestModel
 # Make the repository root importable when pytest is run from anywhere.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from decomposition import decompose  # noqa: E402
 from governed_duckdb_tool import (  # noqa: E402
     CitedMetric,
     FactBase,
@@ -36,6 +37,7 @@ from governed_duckdb_tool import (  # noqa: E402
     verify_cited_metrics,
 )
 from langchain_context_chain import build_planning_chain, resolve_context  # noqa: E402
+from narrative_agent import NarrativeBrief  # noqa: E402
 from pipeline import run_dual_lens_pipeline  # noqa: E402
 from salience import compute_salience  # noqa: E402
 from semantic_contracts import (  # noqa: E402
@@ -419,3 +421,56 @@ def test_end_to_end_happy_path(db, fake_planner):
     assert len(run.audit_trail) == 2 and all(r.executed for r in run.audit_trail)
     assert run.department_salience.scores[0].attribute in ("license_revenue", "tenure_years")
     assert run.enterprise_salience.lens == "enterprise"
+
+
+# 8: narration of the revenue decomposition goes through the existing gate
+
+
+def test_gate_checks_decomposition_figures(db, context, tool, good_plan):
+    """A figure present in the decomposition table passes; one absent from it fails; the brief shows the same figures."""
+    conn, _ = db
+    dept_decomposition = decompose(conn, "department")
+    ent_decomposition = decompose(conn, "enterprise")
+    department_salience = compute_salience(conn, DEPARTMENT_CONTRACT, good_plan.department.sql)
+    enterprise_salience = compute_salience(conn, ENTERPRISE_CONTRACT, good_plan.enterprise.sql)
+    department_result = tool.execute(good_plan.department)
+    enterprise_result = tool.execute(good_plan.enterprise)
+    fact_base = build_fact_base(
+        context, department_result, enterprise_result, department_salience, enterprise_salience,
+        dept_decomposition, ent_decomposition,
+    )
+
+    churn = ent_decomposition.components.churn
+    present = verify_cited_metrics(
+        [CitedMetric(label="enterprise churn", lens="enterprise", value=churn)],
+        fact_base,
+        prose=f"Churn removed {churn:,.1f} of seat-license revenue.",
+    )
+    assert present.passed is True
+
+    # A derived figure the table does not contain (churn net of contraction) must fail.
+    derived = churn - ent_decomposition.components.contraction
+    absent = verify_cited_metrics(
+        [CitedMetric(label="net churn", lens="enterprise", value=derived)], fact_base
+    )
+    assert absent.passed is False
+
+    # Lens discipline: the migration-in figure differs by lens, so the department value fails under enterprise.
+    assert dept_decomposition.components.migration_in != ent_decomposition.components.migration_in
+    wrong_lens = verify_cited_metrics(
+        [CitedMetric(label="migration in", lens="enterprise", value=dept_decomposition.components.migration_in)],
+        fact_base,
+    )
+    assert wrong_lens.passed is False
+
+    brief = NarrativeBrief(
+        context=context,
+        department_result=department_result,
+        enterprise_result=enterprise_result,
+        department_salience=department_salience,
+        enterprise_salience=enterprise_salience,
+        department_decomposition=dept_decomposition,
+        enterprise_decomposition=ent_decomposition,
+    ).render()
+    assert f"churn {churn:,.1f}" in brief
+    assert "does not reconcile to the full change" in brief

@@ -51,7 +51,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from semantic_contracts import CONTRACT_REGISTRY, Lens, MetricContract, PlannedQuery, ResolvedContext
 
-if TYPE_CHECKING:  # salience does not import this module; the name is only needed for hints
+if TYPE_CHECKING:  # these modules import (or sit beside) this one; the names are only needed for hints
+    from decomposition import LensDecomposition
     from salience import SalienceRanking
 
 # A DuckDB cell as it crosses the tool boundary. Kept to scalars so ResultTable
@@ -351,16 +352,28 @@ def build_fact_base(
     enterprise_result: ExecutionResult,
     department_salience: "SalienceRanking",
     enterprise_salience: "SalienceRanking",
+    department_decomposition: "LensDecomposition | None" = None,
+    enterprise_decomposition: "LensDecomposition | None" = None,
 ) -> FactBase:
-    """Assemble the per-lens fact base from executed results, salience statistics and contract thresholds."""
+    """Assemble the per-lens fact base from executed results, salience statistics and contract thresholds.
 
-    def lens_facts(lens: Lens, result: ExecutionResult, ranking: "SalienceRanking") -> list[float]:
+    When a lens has a decomposition, the figures its brief section presents are
+    appended to that lens's facts. This is the same gate, not a second one.
+    """
+
+    def lens_facts(
+        lens: Lens,
+        result: ExecutionResult,
+        ranking: "SalienceRanking",
+        decomposition: "LensDecomposition | None",
+    ) -> list[float]:
         thresholds = [float(t.value) for t in context.contract_for(lens).thresholds]
-        return [float(result.row_count)] + ranking.numeric_facts() + thresholds
+        movement = decomposition.figures() if decomposition is not None else []
+        return [float(result.row_count)] + ranking.numeric_facts() + thresholds + movement
 
     return FactBase(
-        department=lens_facts("department", department_result, department_salience),
-        enterprise=lens_facts("enterprise", enterprise_result, enterprise_salience),
+        department=lens_facts("department", department_result, department_salience, department_decomposition),
+        enterprise=lens_facts("enterprise", enterprise_result, enterprise_salience, enterprise_decomposition),
     )
 
 

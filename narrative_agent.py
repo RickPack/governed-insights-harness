@@ -41,6 +41,7 @@ from pydantic_ai import Agent, ModelRetry, RunContext  # noqa: E402
 from pydantic_ai.exceptions import UnexpectedModelBehavior  # noqa: E402
 from pydantic_ai.models import Model  # noqa: E402
 
+from decomposition import LensDecomposition  # noqa: E402
 from governed_duckdb_tool import (  # noqa: E402
     CitedMetric,
     ExecutionResult,
@@ -131,6 +132,12 @@ class NarrativeBrief(BaseModel):
     enterprise_result: ExecutionResult = Field(description="Executed enterprise-lens result set.")
     department_salience: SalienceRanking = Field(description="Salience ranking for the department lens.")
     enterprise_salience: SalienceRanking = Field(description="Salience ranking for the enterprise lens.")
+    department_decomposition: LensDecomposition | None = Field(
+        default=None, description="Reconciled revenue movement for the department lens, if computed."
+    )
+    enterprise_decomposition: LensDecomposition | None = Field(
+        default=None, description="Reconciled revenue movement for the enterprise lens, if computed."
+    )
 
     def render(self, top_n: int = 6) -> str:
         """Plain-text brief. Figures are pre-formatted so the model copies rather than computes."""
@@ -139,6 +146,7 @@ class NarrativeBrief(BaseModel):
             contract = self.context.contract_for(lens)
             result = self.department_result if lens == "department" else self.enterprise_result
             ranking = self.department_salience if lens == "department" else self.enterprise_salience
+            decomposition = self.department_decomposition if lens == "department" else self.enterprise_decomposition
             sections.append(f"=== {lens.upper()} LENS — {contract.contract_id} v{contract.version} ===")
             sections.append(f"Grain: {contract.entity_grain}. Metric: {contract.metric_name} ({contract.metric_expression}).")
             sections.append(f"Threshold: {contract.thresholds[0].as_sql()}. {contract.description}")
@@ -153,6 +161,8 @@ class NarrativeBrief(BaseModel):
                     f"  - {score.display_name}: {score.segment_value:,.1f}{unit} vs {score.baseline_value:,.1f}{unit} "
                     f"({score.direction}; effect {score.effect_size:.2f}; {score.method})"
                 )
+            if decomposition is not None:
+                sections.append(decomposition.render())
             sections.append("")
         return "\n".join(sections)
 
@@ -182,6 +192,8 @@ _INSTRUCTIONS = (
     "Write measured figures (revenue, means, percentages) with thousands separators and one decimal "
     "place; write counts of licenses or organizations as whole numbers. Never use the dollar sign or "
     "underscores in prose; write attribute names as plain words. "
+    "Where a lens section includes a revenue movement block, describe the movement using only its figures; "
+    "it explains seat-license revenue only, and the labelled subset does not reconcile to the full change. "
     "Explain the divergence between lenses in terms of grain, metric, and threshold."
 )
 

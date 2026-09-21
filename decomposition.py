@@ -242,9 +242,12 @@ class LensDecomposition(BaseModel):
     def figures(self) -> list[float]:
         """Every number this decomposition presents, for the narration FactBase."""
         c = self.components
+        fv = self.floor_view
         return [
             self.begin_revenue, self.end_revenue, self.reported_change,
             c.new, c.expansion, c.contraction, c.churn, c.migration_in, c.migration_out,
+            float(self.entities), float(self.outcome.rows_checked), self.outcome.tolerance,
+            float(fv.members), fv.reported_change,
         ]
 
     def render(self) -> str:
