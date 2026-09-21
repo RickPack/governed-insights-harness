@@ -219,6 +219,8 @@ producing `DualLensPlan` and producing `ExecutiveDeliverable`. Everything betwee
 | `governed_insights_langchain.ipynb` | The guided tour, committed with executed outputs. Generated; do not hand-edit. |
 | `tests/test_pipeline.py` | Sixteen cases, models mocked at the boundary, no network, no key. |
 | `tests/test_decomposition.py` | Ten cases (some run under both lenses) for classification, grain, reconciliation and the floor view. |
+| `equivalence.py` | Paired equivalence check for a proposed floor change: Tango score interval, TOST decision, seeded power. Illustrative. |
+| `tests/test_equivalence.py` | Twelve cases: the R test vector, orientation, decision rule, discordant counts, seeded power and size. |
 | `tests/test_contracts.py` | Five cases for contract ownership and metric-name collisions. |
 
 ## Quickstart
@@ -294,7 +296,7 @@ exercised for real. The narrative model is PydanticAI's `TestModel`. Nothing els
 - A figure quoted from the revenue decomposition passes the same gate; a derived figure the table does not contain, or a figure cited under the wrong lens, fails it.
 - Every audit record, including a refused plan, carries a duration; run telemetry reports the calls and stage timings it observed.
 
-The other two files add 15 cases, also offline. `tests/test_decomposition.py` covers a clean reconciliation, an injected discrepancy that fails closed, internal versus cross-organization migration, the grain invariant, contraction versus churn, a migration with a missing destination, and a period with no movement. `tests/test_contracts.py` covers owners and the collision check.
+The other three files add 27 cases, also offline. `tests/test_decomposition.py` covers a clean reconciliation, an injected discrepancy that fails closed, internal versus cross-organization migration, the grain invariant, contraction versus churn, a migration with a missing destination, and a period with no movement. `tests/test_contracts.py` covers owners and the collision check. `tests/test_equivalence.py` checks the Tango interval against a numeric vector from R's `PropCIs::scoreci.mp`, the orientation of the estimate, the decision rule, that discordant counts are always reported, and that the seeded Monte Carlo power and size are reproducible.
 
 ## Design decisions worth knowing
 
@@ -335,8 +337,33 @@ The other two files add 15 cases, also offline. `tests/test_decomposition.py` co
 - **Contracts have owners, and one name means one definition.** Each contract names the team accountable for it
   (`license-ops`, `account-strategy`). Ownership is metadata and changes no behaviour. A test fails if two contracts share a metric
   name but define it differently.
+- **A floor change can be checked for equivalence before it ships.** `equivalence.py` asks whether a candidate definition (here, the
+  department contract with a 5,500 floor, defined only in that module and not registered) puts the same licenses in the segment as
+  the current one, within a margin. Each license is in or out under each definition, so the data are paired binary observations. It
+  computes the Tango (1998) score interval for the difference of paired proportions and calls the definitions equivalent when the
+  90% interval lies inside the margin, which is the two one-sided tests procedure. The primary margin is ±0.05, with ±0.02 as a
+  sensitivity margin. The harness borrows the equivalence-testing idea from Lo et al. (2025); it does not reproduce or validate their
+  method.
+  - *Read the discordant counts.* Equivalent aggregate rates can hide large disagreement about individual licenses, so every result
+    prints b (in the segment under the current definition only), c (candidate only) and n beside the interval.
+  - *Orientation:* the estimate is candidate minus current, (c − b) / n. R's `scoreci.mp(x, y, n)` estimates (y − x) / n, so
+    `tango_interval(b, c, n)` matches `scoreci.mp(x = b, y = c, n = n)`. The unit test pins this against a vector from R.
+  - *Power and size:* a seeded Monte Carlo reports power at a true difference of zero for the observed sample size and discordance,
+    with 0.80 as the bar for calling the check adequately powered, and checks that the chance of declaring equivalence at the
+    margin boundary stays near the 0.05 target.
+  - *Framing:* illustrative only. The synthetic data are fully enumerated, so there is no sampling and the interval describes a
+    data-generating process. The check is designed for a monitoring sample of a real book, not for this dataset.
 - **Fail closed, twice.** An unmatched question is refused. A narrative that cannot be verified is suppressed. In both cases the
   system prefers to say less rather than to say something it cannot trace.
+
+## References
+
+- Lo, V. S. Y., Datta, S., & Salami, Y. (2025). Bringing practical statistical science to AI and predictive model fairness testing.
+  *AI and Ethics, 5*, 2149-2164. https://doi.org/10.1007/s43681-024-00518-2
+- Tango, T. (1998). Equivalence test and confidence interval for the difference in proportions for the paired-sample design.
+  *Statistics in Medicine, 17*(8), 891-908.
+- Pack, R., Lo, V., & Yao, P. (in preparation). Fair mentor matching at enterprise scale: Gale-Shapley pairing, NLP, and prespecified
+  statistical validation. Joint Statistical Meetings 2026.
 
 ## Future extensions
 
