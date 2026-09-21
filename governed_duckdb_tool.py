@@ -41,6 +41,7 @@ can be rendered, stored, or diffed without parsing log lines.
 from __future__ import annotations
 
 import re
+import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Iterable, Union
 
@@ -117,6 +118,7 @@ class AuditRecord(BaseModel):
     executed: bool = Field(description="False when the validator refused the plan.")
     checks: list[GateCheck] = Field(description="Every validator rule and its outcome.")
     timestamp: datetime = Field(description="UTC time the record was written.")
+    duration_ms: float = Field(ge=0, description="Wall-clock milliseconds from validation start to the record being written.")
 
 
 class CitedMetric(BaseModel):
@@ -260,12 +262,13 @@ class GovernedDuckDBTool:
 
     def execute(self, plan: PlannedQuery) -> ExecutionResult:
         """Validate, execute, and audit one plan. Raises GovernanceViolation if any rule fails."""
+        started = time.perf_counter()
         contract = self._context.contract_for(plan.lens)
         checks = validate_plan(plan, contract)
         failed = [c for c in checks if not c.passed]
 
         if failed:
-            self._record(plan, row_count=0, executed=False, checks=checks)
+            self._record(plan, row_count=0, executed=False, checks=checks, started=started)
             raise GovernanceViolation(
                 f"{plan.lens} plan refused by pre-execution validator: "
                 + " | ".join(f"{c.name}: {c.detail}" for c in failed)
@@ -276,7 +279,7 @@ class GovernedDuckDBTool:
         rows = [[_to_scalar(v) for v in row] for row in relation.fetchall()]
         table = ResultTable(columns=columns, rows=rows)
 
-        self._record(plan, row_count=len(rows), executed=True, checks=checks)
+        self._record(plan, row_count=len(rows), executed=True, checks=checks, started=started)
         return ExecutionResult(
             lens=plan.lens,
             contract_id=plan.contract_id,
@@ -286,7 +289,9 @@ class GovernedDuckDBTool:
             row_count=len(rows),
         )
 
-    def _record(self, plan: PlannedQuery, *, row_count: int, executed: bool, checks: list[GateCheck]) -> None:
+    def _record(
+        self, plan: PlannedQuery, *, row_count: int, executed: bool, checks: list[GateCheck], started: float
+    ) -> None:
         self.audit_trail.append(
             AuditRecord(
                 lens=plan.lens,
@@ -297,6 +302,7 @@ class GovernedDuckDBTool:
                 executed=executed,
                 checks=checks,
                 timestamp=datetime.now(timezone.utc),
+                duration_ms=(time.perf_counter() - started) * 1000,
             )
         )
 

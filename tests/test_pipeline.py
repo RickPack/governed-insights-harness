@@ -422,6 +422,16 @@ def test_end_to_end_happy_path(db, fake_planner):
     assert run.department_salience.scores[0].attribute in ("license_revenue", "tenure_years")
     assert run.enterprise_salience.lens == "enterprise"
 
+    # Telemetry records observed behaviour only.
+    telemetry = run.telemetry
+    assert telemetry.llm_calls == 2  # one planner call, one narrative output
+    assert telemetry.governed_queries == 2 == len(run.audit_trail)
+    assert telemetry.deterministic_operations == 2 + 2 + 2 + 1
+    assert set(telemetry.stage_ms) == {"plan", "execute", "salience", "decomposition", "narrative"}
+    assert all(ms >= 0 for ms in telemetry.stage_ms.values())
+    assert telemetry.total_ms == pytest.approx(sum(telemetry.stage_ms.values()))
+    assert all(r.duration_ms >= 0 for r in run.audit_trail)
+
 
 # 8: narration of the revenue decomposition goes through the existing gate
 
@@ -474,3 +484,12 @@ def test_gate_checks_decomposition_figures(db, context, tool, good_plan):
     ).render()
     assert f"churn {churn:,.1f}" in brief
     assert "does not reconcile to the full change" in brief
+
+
+def test_refused_plan_is_audited_with_a_duration(tool, good_plan):
+    """A refused call still writes an audit record, and it carries a non-negative duration."""
+    bad = good_plan.department.model_copy(update={"sql": good_plan.department.sql.replace("5000", "4999")})
+    with pytest.raises(GovernanceViolation):
+        tool.execute(bad)
+    record = tool.audit_trail[-1]
+    assert record.executed is False and record.duration_ms >= 0
