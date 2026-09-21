@@ -3,6 +3,7 @@
 **Author:** Rick Pack
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/RickPack/governed-insights-harness/blob/main/governed_insights_langchain.ipynb)
+[![tests](https://github.com/RickPack/governed-insights-harness/actions/workflows/tests.yml/badge.svg)](https://github.com/RickPack/governed-insights-harness/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://www.python.org/)
 [![LangChain](https://img.shields.io/badge/LangChain-LCEL%20orchestration-1c3c3c.svg)](https://python.langchain.com/)
