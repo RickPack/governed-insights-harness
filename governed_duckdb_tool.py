@@ -18,6 +18,9 @@ This module puts it on code that can be unit-tested:
     invented is rejected even if it looks reasonable.
   * Cross-grain joins. A query that reaches across to the other grain's table
     without an intermediate aggregation is rejected; it would double-count.
+  * The filter in force. Thresholds and the WHERE clause are read from DuckDB's
+    parsed syntax tree (sql_predicates.py), not from the SQL text, so a cutoff
+    that is present but defeated by OR, NOT, UNION or LIMIT is refused.
 
 THE ZERO-TOKEN-MATH GATE
 ------------------------
@@ -40,6 +43,7 @@ can be rendered, stored, or diffed without parsing log lines.
 
 from __future__ import annotations
 
+import math
 import re
 import time
 from datetime import datetime, timezone
@@ -51,6 +55,7 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, ConfigDict, Field
 
 from semantic_contracts import CONTRACT_REGISTRY, Lens, MetricContract, PlannedQuery, ResolvedContext
+from sql_predicates import NumericPredicate, SqlInspection, UnsupportedSql, inspect_sql
 
 if TYPE_CHECKING:  # these modules import (or sit beside) this one; the names are only needed for hints
     from decomposition import LensDecomposition
@@ -147,7 +152,6 @@ class GateOutcome(BaseModel):
 
 _KNOWN_TABLES = {contract.source_table: contract.entity_grain for contract in CONTRACT_REGISTRY}
 _TABLE_REF = re.compile(r"\b(?:from|join)\s+([a-zA-Z_][a-zA-Z0-9_]*)", re.IGNORECASE)
-_COMPARISON = re.compile(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*(>=|<=|>|<|=)\s*(\d+(?:\.\d+)?)\b")
 # A '/' followed (optionally through a CAST or a scalar subquery) by COUNT( that is not COUNT(DISTINCT.
 _RAW_COUNT_DENOMINATOR = re.compile(
     r"/\s*(?:\(\s*select\s+)?(?:cast\s*\(\s*)?count\s*\(\s*(?!distinct\b)", re.IGNORECASE
@@ -166,17 +170,35 @@ def _check_grain_discipline(sql: str) -> GateCheck:
     return GateCheck(name="grain_discipline", passed=True, detail="No raw-row-count denominators found.")
 
 
-def _check_governed_thresholds(sql: str, contract: MetricContract) -> GateCheck:
-    """Every numeric comparison must match a ThresholdDefinition on the cited contract, verbatim."""
-    governed = {(t.column, t.operator, float(t.value)) for t in contract.thresholds}
-    found = [(col, op, float(val)) for col, op, val in _COMPARISON.findall(sql)]
-    if not found:
+def _is_governed(predicate: NumericPredicate, contract: MetricContract) -> bool:
+    return any(
+        predicate.column == t.column.lower() and predicate.operator == t.operator and math.isclose(predicate.value, float(t.value))
+        for t in contract.thresholds
+    )
+
+
+def _check_governed_thresholds(
+    inspected: SqlInspection | None, unsupported: str | None, contract: MetricContract
+) -> GateCheck:
+    """Every numeric comparison must match a ThresholdDefinition on the cited contract, verbatim.
+
+    Read from the parsed SQL, so `5000 <= license_revenue` and `license_revenue >= 5000.0`
+    count as the governed floor and a constant on the wrong side of an OR does not.
+    """
+    if inspected is None:
+        return GateCheck(
+            name="governed_thresholds",
+            passed=False,
+            detail=f"Cutoffs cannot be verified because the SQL is outside the governed subset ({unsupported}).",
+        )
+    found = [p for p in inspected.top_level + inspected.nested if isinstance(p, NumericPredicate)]
+    if not any(isinstance(p, NumericPredicate) for p in inspected.top_level):
         return GateCheck(
             name="governed_thresholds",
             passed=False,
             detail="The plan applies no threshold; a segment query must filter by a governed cutoff.",
         )
-    ungoverned = [f"{col} {op} {val:g}" for col, op, val in found if (col, op, val) not in governed]
+    ungoverned = [f"{p.column} {p.operator} {p.value:g}" for p in found if not _is_governed(p, contract)]
     if ungoverned:
         return GateCheck(
             name="governed_thresholds",
@@ -223,12 +245,67 @@ def _check_source_table(sql: str, contract: MetricContract) -> GateCheck:
     return GateCheck(name="source_table", passed=True, detail=f"Reads {contract.source_table}.")
 
 
+def _check_where_clause(
+    plan: PlannedQuery, contract: MetricContract, inspected: SqlInspection | None, unsupported: str | None
+) -> GateCheck:
+    """The filter that is actually in force: read from the parsed SQL, not from its text.
+
+    Every WHERE must be an AND of governed predicates, the plan's named
+    threshold must be one of them, and only governed tables may be read. This
+    is what stops `WHERE floor OR 1 = 1` and `WHERE NOT (floor)`, which text
+    matching cannot tell from the real cutoff.
+    """
+    if inspected is None:
+        return GateCheck(name="where_clause", passed=False, detail=f"Plan SQL is outside the governed subset: {unsupported}.")
+
+    problems: list[str] = []
+    for predicate in inspected.top_level + inspected.nested:
+        if isinstance(predicate, NumericPredicate):
+            if not _is_governed(predicate, contract):
+                problems.append(f"{predicate.column} {predicate.operator} {predicate.value:g} is not a governed threshold")
+        else:
+            problems.append(f"filter on {predicate.column} is not a governed threshold or dimension filter")
+
+    try:
+        named = contract.threshold(plan.threshold_name)
+    except KeyError:
+        problems.append(f"threshold {plan.threshold_name!r} does not exist on contract {contract.contract_id}")
+    else:
+        applied = any(
+            isinstance(p, NumericPredicate)
+            and p.column == named.column.lower()
+            and p.operator == named.operator
+            and math.isclose(p.value, float(named.value))
+            for p in inspected.top_level
+        )
+        if not applied:
+            problems.append(f"the top-level WHERE must apply {named.as_sql()} as one of its AND-joined predicates")
+
+    ungoverned_tables = sorted({t for t in inspected.tables if t not in _KNOWN_TABLES})
+    if ungoverned_tables:
+        problems.append(f"table(s) {ungoverned_tables} are not governed sources")
+
+    if problems:
+        return GateCheck(name="where_clause", passed=False, detail="; ".join(problems) + ".")
+    return GateCheck(
+        name="where_clause",
+        passed=True,
+        detail=f"WHERE is a conjunction of {len(inspected.top_level)} governed predicate(s); tables are governed.",
+    )
+
+
 def validate_plan(plan: PlannedQuery, contract: MetricContract) -> list[GateCheck]:
     """Run every pre-execution rule. Returns all outcomes so the audit record is complete even on failure."""
+    try:
+        inspected: SqlInspection | None = inspect_sql(plan.sql)
+        unsupported: str | None = None
+    except UnsupportedSql as exc:
+        inspected, unsupported = None, str(exc)
     return [
         _check_source_table(plan.sql, contract),
         _check_grain_discipline(plan.sql),
-        _check_governed_thresholds(plan.sql, contract),
+        _check_governed_thresholds(inspected, unsupported, contract),
+        _check_where_clause(plan, contract, inspected, unsupported),
         _check_cross_grain_join(plan.sql, contract),
     ]
 

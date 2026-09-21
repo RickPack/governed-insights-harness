@@ -55,7 +55,8 @@ The harness treats the ambiguity as the deliverable rather than as noise to reso
    a `DualLensPlan`. A plan that applies the organization threshold to the license table is a visible mismatch between the plan and the
    contract it cites, and it is rejected at the type boundary.
 4. **A governed DuckDB tool validates before it executes.** Grain discipline (ratios divide by `COUNT(DISTINCT entity_id)`), governed
-   thresholds only, no cross-grain joins without intermediate aggregation. Every call writes a typed audit record.
+   thresholds only, no cross-grain joins without intermediate aggregation, and a WHERE clause that is an AND of governed predicates,
+   read from DuckDB's parsed syntax tree rather than from the SQL text. Every call writes a typed audit record.
 5. **Salience is arithmetic, computed per lens.** For each lens, every profile attribute is scored against that lens's own baseline.
    Numeric attributes use Cohen's d; categorical attributes use the percentage-point delta at each level. The top-ranked attribute
    other than the selection metric becomes a one-sentence lead insight ("the most distinctive quality of this segment is module
@@ -209,6 +210,7 @@ producing `DualLensPlan` and producing `ExecutiveDeliverable`. Everything betwee
 | `decomposition.py` | Deterministic revenue movement per lens, reconciled by a fail-closed gate. No model involved. |
 | `langchain_context_chain.py` | LCEL chain: retrieval, prompt, structured planning, governed plan. |
 | `governed_duckdb_tool.py` | Pre-execution validator, DuckDB tool, audit records, the zero-token-math gate. |
+| `sql_predicates.py` | Parse-based inspection of planned SQL: which predicates and tables a plan actually uses. Refuses OR, NOT, UNION, LIMIT and the like. |
 | `salience.py` | Per-lens attribute salience; Cohen's d for numeric, percentage-point delta for categorical. |
 | `narrative_agent.py` | PydanticAI agent with the gate wired in as an output validator; fails closed. |
 | `pipeline.py` | The one composition function both entry points call; returns a typed `PipelineRun`. |
@@ -222,6 +224,7 @@ producing `DualLensPlan` and producing `ExecutiveDeliverable`. Everything betwee
 | `equivalence.py` | Paired equivalence check for a proposed floor change: Tango score interval, TOST decision, seeded power. Illustrative. |
 | `tests/test_equivalence.py` | Twelve cases: the R test vector, orientation, decision rule, discordant counts, seeded power and size. |
 | `tests/test_contracts.py` | Five cases for contract ownership and metric-name collisions. |
+| `tests/test_sql_governance.py` | Twenty cases (parametrised) for the parse-based WHERE-clause check, including the filters that used to slip past the text rules. |
 
 ## Quickstart
 
@@ -292,9 +295,16 @@ exercised for real. The narrative model is PydanticAI's `TestModel`. Nothing els
 - A figure quoted from the revenue decomposition passes the same gate; a derived figure the table does not contain, or a figure cited under the wrong lens, fails it.
 - Every audit record, including a refused plan, carries a duration; run telemetry reports the calls and stage timings it observed.
 
-The other three files add 27 cases, also offline. `tests/test_decomposition.py` covers a clean reconciliation, an injected discrepancy that fails closed, internal versus cross-organization migration, the grain invariant, contraction versus churn, a migration with a missing destination, and a period with no movement. `tests/test_contracts.py` covers owners and the collision check. `tests/test_equivalence.py` checks the Tango interval against a numeric vector from R's `PropCIs::scoreci.mp`, the orientation of the estimate, the decision rule, that discordant counts are always reported, and that the seeded Monte Carlo power and size are reproducible.
+`tests/test_sql_governance.py` adds twenty more (parametrised) for the WHERE-clause check. It includes `WHERE floor OR 1 = 1` and `WHERE NOT (floor)`, which the earlier text-matching rules accepted and which return rows outside the segment; a test runs the widened SQL directly to show the floor is defeated, and another confirms the tool now refuses it and audits the refusal. The other three files add 27 cases, also offline. `tests/test_decomposition.py` covers a clean reconciliation, an injected discrepancy that fails closed, internal versus cross-organization migration, the grain invariant, contraction versus churn, a migration with a missing destination, and a period with no movement. `tests/test_contracts.py` covers owners and the collision check. `tests/test_equivalence.py` checks the Tango interval against a numeric vector from R's `PropCIs::scoreci.mp`, the orientation of the estimate, the decision rule, that discordant counts are always reported, and that the seeded Monte Carlo power and size are reproducible.
 
 ## Design decisions worth knowing
+
+- **The validator reads the syntax tree, not the SQL text.** The first version matched the governed cutoff with regular expressions.
+  Probing it showed the cutoff can be present in the text and defeated in effect: `WHERE license_revenue >= 5000 OR 1 = 1` returned all
+  119 licenses instead of 21, and `NOT (license_revenue >= 5000)` returned the complement. `sql_predicates.py` now asks DuckDB's own
+  parser for the tree and accepts a small subset: one plain SELECT, governed base tables, and a WHERE that is an AND of governed
+  predicates. Anything else is refused with the reason. The cost is that a legitimate but unusual plan (a CTE, a `LIMIT`) is refused
+  rather than guessed at; the planner prompt says to emit only the supported shape.
 
 - **Organization platform revenue is materialised on the organization table.** Each contract reads one table at one grain. A reviewer
   can reproduce either lens with plain SQL, and the cross-grain join rule has a clean definition of "foreign table".

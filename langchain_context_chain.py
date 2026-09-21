@@ -111,7 +111,9 @@ prompt_template = ChatPromptTemplate.from_messages(
             "Do not invent, round, or adjust any numeric cutoff.\n"
             "4. Copy contract_id and version into the plan exactly.\n"
             "5. If a ratio is ever needed, the denominator must be COUNT(DISTINCT entity_id_column).\n"
-            "6. Emit a single SELECT statement per lens with no trailing semicolon.",
+            "6. Emit a single plain SELECT statement per lens with no trailing semicolon. The WHERE clause must be the "
+            "governed threshold and nothing else, or AND-joined governed predicates. Do not use OR, NOT, UNION, WITH, "
+            "HAVING, LIMIT or table functions; a plan that does is refused before it runs.",
         ),
         (
             "human",
