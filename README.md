@@ -213,6 +213,7 @@ producing `DualLensPlan` and producing `ExecutiveDeliverable`. Everything betwee
 | `governed_duckdb_tool.py` | Pre-execution validator, DuckDB tool, audit records, the zero-token-math gate. |
 | `sql_predicates.py` | Parse-based inspection of planned SQL: which predicates and tables a plan actually uses. Refuses OR, NOT, UNION, LIMIT and the like. |
 | `eval_live.py` | Live evaluation: runs a fixed question set several times, scores scope and gate outcomes, reports rates with Wilson intervals. Spends nothing without `--yes`. |
+| `tests/test_seed_sweep.py` | Forty-one cases (parametrised) checking twenty seeds: decompositions reconcile, segments are non-empty, the lenses stay different, and a seed reproduces every table. |
 | `tests/test_eval_live.py` | Fifteen cases (parametrised) for the interval arithmetic, scoring, failure classification, the eval set's consistency with the contract vocabulary, and the no-spend guard. |
 | `tests/test_planner_scope.py` | Thirty-one cases (parametrised) for governed, question-driven scoping: the allowlist, plan validation, refusals, scoped baseline and decomposition, an empty segment, and an end-to-end run. |
 | `salience.py` | Per-lens attribute salience; Cohen's d for numeric, percentage-point delta for categorical. |
@@ -237,7 +238,7 @@ git clone https://github.com/RickPack/governed-insights-harness.git
 cd governed-insights-harness
 pip install -r requirements.txt
 
-# Tests run with no network and no API key.
+# Tests run with no network and no API key. A GitHub Actions workflow runs the same command on every push and pull request.
 python -m pytest tests -q
 
 # The live demo needs a Gemini key.
@@ -319,6 +320,14 @@ exercised for real. The narrative model is PydanticAI's `TestModel`. Nothing els
 `tests/test_sql_governance.py` adds twenty more (parametrised) for the WHERE-clause check. It includes `WHERE floor OR 1 = 1` and `WHERE NOT (floor)`, which the earlier text-matching rules accepted and which return rows outside the segment; a test runs the widened SQL directly to show the floor is defeated, and another confirms the tool now refuses it and audits the refusal. The other three files add 27 cases, also offline. `tests/test_decomposition.py` covers a clean reconciliation, an injected discrepancy that fails closed, internal versus cross-organization migration, the grain invariant, contraction versus churn, a migration with a missing destination, and a period with no movement. `tests/test_contracts.py` covers owners and the collision check. `tests/test_equivalence.py` checks the Tango interval against a numeric vector from R's `PropCIs::scoreci.mp`, the orientation of the estimate, the decision rule, that discordant counts are always reported, and that the seeded Monte Carlo power and size are reproducible.
 
 ## Design decisions worth knowing
+
+- **The contrast between the lenses is engineered, and checked beyond one seed.** The generator builds archetypes so the two
+  definitions of "high value" disagree, which is the point of the demonstration. That would be a weak result if it were an accident of
+  seed 42, so `tests/test_seed_sweep.py` checks twenty seeds: the organizations each lens selects overlap by less than half, each lens
+  finds organizations the other misses, every decomposition reconciles and no segment is empty. In a 200-seed exploration outside the
+  test suite the overlap ranged from 0.04 to 0.32. This shows the generator behaves as designed. It says nothing about real data,
+  where the lenses may agree. The narrative prompt asks the model to explain why the lenses differ, and I have not tested how the
+  pipeline behaves when they do not; that is a real gap.
 
 - **What the planner does that the contract cannot.** For the demo question, nothing: the correct SQL follows from the contract, and
   the validator refuses anything else, so a model that is right reproduces the contract's SQL. An earlier version of this repository
