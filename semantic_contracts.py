@@ -27,7 +27,7 @@ caught at runtime; they are unconstructable.
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import Iterable, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -96,6 +96,9 @@ class MetricContract(BaseModel):
     contract_id: str = Field(description="Stable identifier, e.g. 'license_seat_revenue'.")
     lens: Lens = Field(description="Which lens this contract serves: 'department' or 'enterprise'.")
     version: str = Field(description="Semantic version of this definition, e.g. '2.0.0'. Bumped on any rule change.")
+    owner: str = Field(
+        description="Team accountable for this definition and its version bumps. Metadata only; it changes no behaviour."
+    )
     scope: str = Field(description="Business scope the definition applies to, e.g. 'Enterprise SaaS account base'.")
     entity_grain: EntityGrain = Field(description="The unit each row represents: 'license' or 'organization'.")
     entity_id_column: str = Field(description="Column that uniquely identifies one entity at this grain. Must end in '_id'.")
@@ -123,7 +126,7 @@ class MetricContract(BaseModel):
             raise ValueError(f"version must be semantic (MAJOR.MINOR.PATCH), got {value!r}")
         return value
 
-    @field_validator("metric_expression", "source_table", "metric_name", "scope")
+    @field_validator("metric_expression", "source_table", "metric_name", "scope", "owner")
     @classmethod
     def _non_blank(cls, value: str) -> str:
         """Blank strings satisfy the type checker but not the business; reject them."""
@@ -375,6 +378,7 @@ DEPARTMENT_CONTRACT = MetricContract(
     contract_id="license_seat_revenue",
     lens="department",
     version="1.2.0",
+    owner="license-ops",
     scope="Enterprise SaaS account base, evaluated per license agreement",
     entity_grain="license",
     entity_id_column="license_id",
@@ -403,6 +407,7 @@ ENTERPRISE_CONTRACT = MetricContract(
     contract_id="organization_platform_revenue",
     lens="enterprise",
     version="2.0.0",
+    owner="account-strategy",
     scope="Enterprise SaaS account base, evaluated per parent organization",
     entity_grain="organization",
     entity_id_column="organization_id",
@@ -446,6 +451,37 @@ ENTERPRISE_SEGMENT = CustomerSegmentDefinition(
     threshold_name="high_value_floor",
     selection_rule="Organizations whose consolidated platform revenue meets the governed high_value_floor.",
 )
+
+def metric_collisions(contracts: Iterable[MetricContract]) -> list[str]:
+    """Describe every pair of contracts that share a metric_name but define it differently.
+
+    Two teams calling different calculations by the same name is how a number
+    ends up meaning two things in two meetings. A definition is the source
+    table, grain, expression and thresholds; version, owner and prose do not count.
+    """
+
+    def definition(contract: MetricContract) -> tuple:
+        return (
+            contract.source_table,
+            contract.entity_grain,
+            contract.metric_expression,
+            tuple((t.column, t.operator, t.value) for t in contract.thresholds),
+        )
+
+    by_name: dict[str, list[MetricContract]] = {}
+    for contract in contracts:
+        by_name.setdefault(contract.metric_name.strip().lower(), []).append(contract)
+    problems: list[str] = []
+    for name, group in by_name.items():
+        for i, first in enumerate(group):
+            for second in group[i + 1 :]:
+                if definition(first) != definition(second):
+                    problems.append(
+                        f"metric {name!r} is defined differently by {first.contract_id} v{first.version} "
+                        f"({first.owner}) and {second.contract_id} v{second.version} ({second.owner})"
+                    )
+    return problems
+
 
 # The registry the retriever searches. Adding a third definition is a new
 # entry here and a version bump, not a prompt edit.

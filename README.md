@@ -204,8 +204,9 @@ producing `DualLensPlan` and producing `ExecutiveDeliverable`. Everything betwee
 
 | File | Role |
 |---|---|
-| `semantic_contracts.py` | Versioned contracts, plan models, `ContextResolutionError`. The deterministic contract layer. |
-| `synthetic_data.py` | Seeded two-grain DuckDB dataset with a deliberate contrast between the lenses. |
+| `semantic_contracts.py` | Versioned, owned contracts, plan models, `ContextResolutionError`, and the metric-name collision check. The deterministic contract layer. |
+| `synthetic_data.py` | Seeded two-grain DuckDB dataset with a deliberate contrast between the lenses, plus license snapshots and movement events for one period. |
+| `decomposition.py` | Deterministic revenue movement per lens, reconciled by a fail-closed gate. No model involved. |
 | `langchain_context_chain.py` | LCEL chain: retrieval, prompt, structured planning, governed plan. |
 | `governed_duckdb_tool.py` | Pre-execution validator, DuckDB tool, audit records, the zero-token-math gate. |
 | `salience.py` | Per-lens attribute salience; Cohen's d for numeric, percentage-point delta for categorical. |
@@ -216,7 +217,9 @@ producing `DualLensPlan` and producing `ExecutiveDeliverable`. Everything betwee
 | `build_notebook.py` | Generates the Colab notebook with nbformat and validates it. |
 | `execute_notebook.py` | Regenerates, executes, verifies and date-stamps the notebook so GitHub shows real outputs. |
 | `governed_insights_langchain.ipynb` | The guided tour, committed with executed outputs. Generated; do not hand-edit. |
-| `tests/test_pipeline.py` | Fourteen cases, models mocked at the boundary, no network, no key. |
+| `tests/test_pipeline.py` | Sixteen cases, models mocked at the boundary, no network, no key. |
+| `tests/test_decomposition.py` | Ten cases (some run under both lenses) for classification, grain, reconciliation and the floor view. |
+| `tests/test_contracts.py` | Five cases for contract ownership and metric-name collisions. |
 
 ## Quickstart
 
@@ -272,7 +275,7 @@ run `python run_demo.py` locally with `GOOGLE_API_KEY` set, as described in Quic
 
 ## What the tests prove
 
-Fourteen cases in `tests/test_pipeline.py`, all passing with no network access and no API key present. The planner is mocked with a
+Sixteen cases in `tests/test_pipeline.py`, all passing with no network access and no API key present. The planner is mocked with a
 `FakeListChatModel` subclass whose `with_structured_output` returns a real Runnable, so LCEL composition with the pipe operator is
 exercised for real. The narrative model is PydanticAI's `TestModel`. Nothing else is mocked.
 
@@ -288,6 +291,10 @@ exercised for real. The narrative model is PydanticAI's `TestModel`. Nothing els
 - Salience against a hand-built fixture uses Cohen's d for numeric and percentage points for categorical attributes, ranks by absolute
   effect, and renders the lead insight from the top score.
 - The end-to-end path produces both summaries, a memo, a passing gate and a complete audit trail.
+- A figure quoted from the revenue decomposition passes the same gate; a derived figure the table does not contain, or a figure cited under the wrong lens, fails it.
+- Every audit record, including a refused plan, carries a duration; run telemetry reports the calls and stage timings it observed.
+
+The other two files add 15 cases, also offline. `tests/test_decomposition.py` covers a clean reconciliation, an injected discrepancy that fails closed, internal versus cross-organization migration, the grain invariant, contraction versus churn, a migration with a missing destination, and a period with no movement. `tests/test_contracts.py` covers owners and the collision check.
 
 ## Design decisions worth knowing
 
@@ -306,6 +313,28 @@ exercised for real. The narrative model is PydanticAI's `TestModel`. Nothing els
 - **The committed notebook is executed, and says so.** `execute_notebook.py` regenerates the notebook, runs every cell with a fresh
   kernel, refuses to proceed on any error, and inserts a dated note naming the model. A reader on GitHub sees real numbers and
   knows which run produced them.
+- **Revenue movement is explained, then reconciled, then narrated.** `decomposition.py` splits the change in seat-license revenue
+  into new, expansion, contraction, churn and migration, using classified events. Reported change comes from period snapshots;
+  components come only from the events; no component is ever computed as a residual. If they disagree by 0.01 or more for any license
+  or organization, the run stops with a typed `ReconciliationError` before any narration. The narrative can then quote only figures
+  from that table, through the same gate as everything else.
+  - *Scope:* seat-license revenue only. Organization platform revenue also holds API and analytics revenue that has no license, so the
+    organization-lens decomposition explains the license part of the change and is labelled that way.
+  - *Migrations:* a move between two licenses of one organization is internal and nets to zero at the organization lens; a move across
+    organizations is external for both. A migration with a missing or unknown destination is treated as external and flagged, never
+    silently internal.
+  - *Floor interaction:* reconciliation runs on the full population. A floor-filtered view is shown only as a labelled subset,
+    because a churned license ends at zero and so falls below any floor; a filtered view cannot reconcile to the full change. The
+    governed floors are unchanged.
+  - *Data:* one synthetic period (2025-Q4) drawn from a separate seeded generator, so the original tables are unchanged. Snapshots
+    and events are independent inputs, which is what lets the gate fail. Real data would bring late events, restatements and
+    multiple periods; none is modelled here.
+- **Telemetry reports what happened, nothing more.** Each audit record has a duration, and each run reports the model calls made,
+  the deterministic operations executed and the time per stage. No baseline was measured, so the repository makes no claim about
+  savings.
+- **Contracts have owners, and one name means one definition.** Each contract names the team accountable for it
+  (`license-ops`, `account-strategy`). Ownership is metadata and changes no behaviour. A test fails if two contracts share a metric
+  name but define it differently.
 - **Fail closed, twice.** An unmatched question is refused. A narrative that cannot be verified is suppressed. In both cases the
   system prefers to say less rather than to say something it cannot trace.
 
