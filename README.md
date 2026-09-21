@@ -305,6 +305,8 @@ The other three files add 27 cases, also offline. `tests/test_decomposition.py` 
   and the governed thresholds: exactly what the model was shown. A narrative that mentions the 5,000.0 floor is citing a versioned
   contract, not inventing a number. Raw result rows are excluded because the model never saw them. Matching is to one decimal
   place with no relative tolerance, because one part in a thousand of a five-figure revenue is room for a fabricated number.
+  Decomposition components that are arithmetically identical at both lenses — the total seat-license revenue pool is the same
+  regardless of grain — pass the wrong-lens check by design; the check catches lens-specific figures like migration amounts.
 - **The lead insight skips the selection metric.** A segment selected for high revenue has high revenue by construction. The
   sentence a product leader repeats is the attribute that differs *given* the selection: tenure for the license lens, module
   count for the organization lens.
