@@ -115,27 +115,40 @@ def print_run(run: PipelineRun) -> None:
     _print_salience(run.department_salience)
     _print_salience(run.enterprise_salience)
 
-    _banner("6. GATE OUTCOMES")
+    _banner("6. REVENUE MOVEMENT (deterministic decomposition, reconciled before any narration)")
+    print(run.department_decomposition.render())
+    print()
+    print(run.enterprise_decomposition.render())
+    print()
+
+    _banner("7. GATE OUTCOMES")
     for record in run.audit_trail:
         status = "executed" if record.executed else "REFUSED"
         checks = ", ".join(f"{c.name}={'pass' if c.passed else 'FAIL'}" for c in record.checks)
         print(f"[{record.lens.upper()} LENS]  {status}  rows={record.row_count}  {checks}")
     print(f"\n{run.gate.detail}")
     print(f"narrative attempts validated: {run.narrative_attempts}")
+    t = run.telemetry
+    print(
+        f"telemetry (observed): {t.llm_calls} model calls, {t.deterministic_operations} deterministic operations "
+        f"({t.governed_queries} governed queries, {t.salience_rankings} salience rankings, {t.decompositions} decompositions, "
+        f"{t.gate_evaluations} gate evaluation(s)); wall-clock {t.total_ms:,.0f} ms"
+    )
+    print("  by stage: " + ", ".join(f"{stage} {ms:,.0f} ms" for stage, ms in t.stage_ms.items()))
 
     if run.deliverable is None:
-        _banner("7. NARRATIVE SUPPRESSED (fail-closed)")
+        _banner("8. NARRATIVE SUPPRESSED (fail-closed)")
         print("The narrative did not pass the zero-token-math gate. The deterministic result sets above stand on their own.")
         return
 
     d = run.deliverable
-    _banner("7. LENS SUMMARIES")
+    _banner("8. LENS SUMMARIES")
     for lens, summary in (("department", d.department_summary), ("enterprise", d.enterprise_summary)):
         print(f"[{lens.upper()} LENS]  {summary.headline}")
         print(f"  {summary.narrative}")
         print(f"  top attributes: {', '.join(summary.top_attributes)}\n")
 
-    _banner("8. RECONCILIATION MEMO")
+    _banner("9. RECONCILIATION MEMO")
     print(d.reconciliation_memo)
     print()
     print("Cited metrics (each verified against executed results):")

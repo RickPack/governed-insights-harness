@@ -18,6 +18,7 @@ loudly if the key is absent rather than hanging on the notebook's key prompt.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -71,6 +72,26 @@ def verify_outputs(path: Path) -> int:
     return code_cells
 
 
+# Absolute local paths leak the machine layout into a public file.
+_LOCAL_PATH = re.compile(r"[A-Za-z]:[\\/]+Users[\\/]|/Users/|/home/[a-z]")
+
+
+def scrub_outputs(path: Path) -> None:
+    """Drop pip's '[notice]' lines (they print the interpreter path), then refuse any output that still holds a local path."""
+    notebook = nbformat.read(path, as_version=4)
+    for index, cell in enumerate(notebook.cells):
+        for output in cell.get("outputs", []) if cell.cell_type == "code" else []:
+            if output.get("output_type") == "stream":
+                output["text"] = "".join(
+                    line for line in output["text"].splitlines(keepends=True) if not line.startswith("[notice]")
+                )
+            texts = [output.get("text", "")] + [v for v in output.get("data", {}).values() if isinstance(v, str)]
+            if any(_LOCAL_PATH.search(t) for t in texts):
+                raise RuntimeError(f"cell {index} output contains an absolute local path; refusing to save it")
+    nbformat.validate(notebook)
+    nbformat.write(notebook, path)
+
+
 def stamp(path: Path, executed_at: datetime) -> None:
     """Insert a dated note after the title so the baked-in outputs are labelled as one captured run."""
     notebook = nbformat.read(path, as_version=4)
@@ -91,6 +112,7 @@ def main() -> int:
 
     build()  # start from a clean, validated, output-free notebook
     execute_in_place(OUTPUT)
+    scrub_outputs(OUTPUT)
     code_cells = verify_outputs(OUTPUT)
     executed_at = datetime.now(timezone.utc)
     stamp(OUTPUT, executed_at)

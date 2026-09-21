@@ -165,6 +165,32 @@ def _salience_table(ranking: SalienceRanking, top_n: int = 8) -> str:
     )
 
 
+def _movement_table(run: PipelineRun) -> str:
+    """Revenue movement per lens. The subset row is labelled because it does not reconcile to the full change."""
+    d, e = run.department_decomposition, run.enterprise_decomposition
+    rows = [
+        ("Seat-license revenue, begin", money(d.begin_revenue), money(e.begin_revenue)),
+        ("+ New", money(d.components.new), money(e.components.new)),
+        ("+ Expansion", money(d.components.expansion), money(e.components.expansion)),
+        ("- Contraction", money(d.components.contraction), money(e.components.contraction)),
+        ("- Churn", money(d.components.churn), money(e.components.churn)),
+        ("+ Migration in", money(d.components.migration_in), money(e.components.migration_in)),
+        ("- Migration out", money(d.components.migration_out), money(e.components.migration_out)),
+        ("Seat-license revenue, end", money(d.end_revenue), money(e.end_revenue)),
+        ("Reconciliation", f"passed on {d.outcome.rows_checked} licenses", f"passed on {e.outcome.rows_checked} organizations"),
+        ("Above-floor subset (labelled; not reconciled)", f"{d.floor_view.members} licenses, change {money(d.floor_view.reported_change)}",
+         f"{e.floor_view.members} organizations, change {money(e.floor_view.reported_change)}"),
+    ]
+    body = "".join(f'<tr><td class="k">{k}</td><td>{a}</td><td>{b}</td></tr>' for k, a, b in rows)
+    return (
+        f"<details><summary>Revenue movement, {escape(d.period)} · seat-license revenue only · migrations inside one organization net to zero "
+        "at the organization lens</summary>"
+        '<table class="cmp"><thead><tr><th></th><th style="color:#1d4ed8">Department lens</th>'
+        '<th style="color:#7c3aed">Enterprise lens</th></tr></thead>'
+        f"<tbody>{body}</tbody></table></details>"
+    )
+
+
 def _audit_record(record: AuditRecord) -> str:
     checks = " &nbsp; ".join(
         f'<span class="{"ok" if c.passed else "bad"}">{c.name}: {"pass" if c.passed else "FAIL"}</span>'
@@ -226,6 +252,7 @@ def render_executive_html(run: PipelineRun, title: str = "Highest-value enterpri
         + '<div class="grid">' + _lens_card(run, "department") + _lens_card(run, "enterprise") + "</div>"
         + _comparison_table(run)
         + memo
+        + _movement_table(run)
         + '<div class="grid">' + _salience_table(run.department_salience) + _salience_table(run.enterprise_salience) + "</div>"
         + f'<div class="badge {gate_class}">{"✔" if run.gate.passed else "✖"} {gate_text}</div>'
         + cited

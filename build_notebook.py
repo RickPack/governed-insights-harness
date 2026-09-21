@@ -262,6 +262,32 @@ print(f"Enterprise lens: segment {enterprise_salience.segment_size} of {enterpri
 print(" ", enterprise_salience.lead_insight())
 display(salience_frame(enterprise_salience))
 """),
+    md("""
+### 5b. Where did the revenue change come from?
+
+The same two lenses can also explain a *change*. `decomposition.py` splits the movement in seat-license revenue over one period
+into new, expansion, contraction, churn and migration, using classified movement events. The reported change comes from period
+snapshots; the components come only from the events; no component is a residual. If they disagree by 0.01 or more for any license or
+organization, the run stops with a `ReconciliationError` before any narration.
+
+Two rules matter. A migration between two licenses of the *same* organization nets to zero at the organization lens, while a
+migration across organizations counts for both. And the decomposition covers seat-license revenue only, because platform revenue
+also holds API and analytics revenue that has no license. The row count is larger than the license count above because it also
+includes the licenses that churned during the period. The model has still not been involved.
+"""),
+    code("""
+import time
+from decomposition import decompose
+
+started = time.perf_counter()
+department_decomposition = decompose(conn, "department")
+enterprise_decomposition = decompose(conn, "enterprise")
+decomposition_ms = (time.perf_counter() - started) * 1000
+
+print(department_decomposition.render())
+print()
+print(enterprise_decomposition.render())
+"""),
     # ------------------------------------------------------------------ 8
     md("""
 ## 6. Synthesis, with a gate on the way out
@@ -270,8 +296,8 @@ Now the second model call, and the only place PydanticAI is used. The agent rece
 rankings, and must return an `ExecutiveDeliverable`: a summary per lens, a reconciliation memo, and a typed `cited_metrics` list.
 
 The **zero-token-math gate** runs as the agent's output validator. Every value in `cited_metrics` is checked, for the lens it
-claims, against a fact base holding exactly the figures the brief showed the model: segment sizes, salience statistics and the
-governed thresholds. A second pass confirms every formatted figure in the prose is in that typed list. A figure that fails either
+claims, against a fact base holding exactly the figures the brief showed the model: segment sizes, salience statistics, the
+revenue-movement figures and the governed thresholds. A second pass confirms every formatted figure in the prose is in that typed list. A figure that fails either
 check is sent back to the model as a retry with the failing values named. If retries run out, the narrative is suppressed and the
 deterministic results stand on their own.
 """),
@@ -281,11 +307,15 @@ from narrative_agent import NarrativeBrief, synthesize_narrative
 
 # The fact base is exactly what the brief shows the model, per lens: segment sizes,
 # salience statistics, and the governed thresholds. Nothing the model was not shown is in it.
-fact_base = build_fact_base(context, department_result, enterprise_result, department_salience, enterprise_salience)
+fact_base = build_fact_base(context, department_result, enterprise_result, department_salience, enterprise_salience,
+                            department_decomposition, enterprise_decomposition)
 brief = NarrativeBrief(context=context, department_result=department_result, enterprise_result=enterprise_result,
-                       department_salience=department_salience, enterprise_salience=enterprise_salience)
+                       department_salience=department_salience, enterprise_salience=enterprise_salience,
+                       department_decomposition=department_decomposition, enterprise_decomposition=enterprise_decomposition)
 
+started = time.perf_counter()
 narrative = synthesize_narrative(brief, fact_base)
+narrative_ms = (time.perf_counter() - started) * 1000
 print(narrative.gate.detail)
 print(f"Model outputs validated before acceptance: {narrative.attempts}")
 if narrative.deliverable:
@@ -300,7 +330,7 @@ that reconciles them, the salience tables that justify the memo, and the governa
 """),
     code("""
 from IPython.display import HTML
-from pipeline import PipelineRun
+from pipeline import PipelineRun, RunTelemetry
 from executive_render import render_executive_html
 
 run = PipelineRun(
@@ -309,6 +339,13 @@ run = PipelineRun(
     department_salience=department_salience, enterprise_salience=enterprise_salience,
     audit_trail=tool.audit_trail, gate=narrative.gate, deliverable=narrative.deliverable,
     narrative_suppressed=narrative.suppressed, narrative_attempts=narrative.attempts,
+    department_decomposition=department_decomposition, enterprise_decomposition=enterprise_decomposition,
+    # This notebook times only the two stages below; pipeline.py times all five.
+    telemetry=RunTelemetry(
+        llm_calls=1 + narrative.attempts, governed_queries=len(tool.audit_trail), salience_rankings=2,
+        decompositions=2, gate_evaluations=narrative.attempts,
+        stage_ms={"decomposition": decomposition_ms, "narrative": narrative_ms},
+    ),
 )
 HTML(render_executive_html(run))
 """),

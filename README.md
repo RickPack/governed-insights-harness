@@ -245,13 +245,14 @@ python execute_notebook.py
 Or open the notebook in Colab with the badge above and store the key as a Colab secret named `GOOGLE_API_KEY`.
 
 The demo asks one question and prints, in order: the question, both resolved contracts, both generated SQL statements, both DuckDB
-result sets, both salience rankings, the validator and gate outcomes, both lens summaries, and the reconciliation memo.
+result sets, both salience rankings, the reconciled revenue movement for each lens, the validator and gate outcomes with run telemetry, both lens summaries, and the reconciliation memo.
 
 ## Sample run
 
-This is real output from `python run_demo.py`, captured 2026-09-18 against Gemini (`gemini-3.6-flash`), seed 42. Full captured
-output, unedited apart from stripping two SDK log lines, is in [SAMPLE_RUN.md](SAMPLE_RUN.md). The committed notebook carries
-the same run's outputs, date-stamped, so the numbers are visible on GitHub without opening Colab.
+This is real output from `python run_demo.py`, captured 2026-09-21 against Gemini (`gemini-3.6-flash`), seed 42. The full captured
+stdout, unedited, is in [SAMPLE_RUN.md](SAMPLE_RUN.md). The committed notebook carries
+outputs from its own live run (also 2026-09-21, model output differs run to run; the deterministic numbers do not), date-stamped, so
+the results are visible on GitHub without opening Colab.
 
 | | Department lens | Enterprise lens |
 |---|---|---|
@@ -261,15 +262,10 @@ the same run's outputs, date-stamped, so the numbers are visible on GitHub witho
 | Segment mean metric | 8,789.5 | 30,638.3 |
 | Baseline mean metric | 3,221.3 | 13,246.7 |
 | Lead insight (computed, not written) | Tenure: 17.5 yrs vs 7.8 yrs baseline (Cohen's d +1.55) | Module count: 8.9 vs 4.7 baseline (Cohen's d +1.37) |
-| Zero-token-math gate | Passed: 20 of 20 cited figures traced for their lens, prose fully cited, 1 attempt | Same run, same gate |
+| Seat-license revenue movement, 2025-Q4 | Change 32,370.7 across 125 licenses (119 current plus 6 churned): new 46,863.3, expansion 14,996.2, contraction 9,020.4, churn 20,184.3, migration in 1,697.9, migration out 1,981.8. Reconciled. | Same change across 50 organizations; migrations between licenses of one organization net to zero, leaving migration in 395.2 and out 679.2. Reconciled. |
+| Zero-token-math gate | Passed: 46 of 46 cited figures traced for their lens (both lenses together), prose fully cited, 1 attempt | Same run, same gate |
 
-**Reconciliation memo (verbatim from the run):** "The department lens and enterprise lens surface distinct populations because they
-evaluate account performance through different analytical contracts. The department lens operates at a license grain using single
-seat-license revenue with a threshold of 5,000.0, highlighting individual high-value contracts and long-tenured software usage. In
-contrast, the enterprise lens operates at an organization grain using consolidated platform revenue with a threshold of 25,000.0,
-capturing broad accounts that integrate multiple products such as API and analytics modules. Neither lens is wrong; they simply
-answer different operational and strategic questions. While the department view identifies key individual license deals for
-volume-driven teams, the enterprise view reveals total account expansion across the full relationship."
+**Reconciliation memo (verbatim from the run):** "The department lens operates at the license grain, evaluating annual seat-license revenue against a threshold of 5,000 to isolate large individual contracts. In contrast, the enterprise lens operates at the parent organization grain, applying a threshold of 25,000 across total consolidated platform revenue, which incorporates API call volume and analytics modules alongside seat licenses. Consequently, the enterprise lens captures accounts that achieve high aggregate value through product breadth across multiple integrated modules, even when individual licenses remain below 5,000. Conversely, the department lens highlights legacy licenses with long tenure regardless of whether the parent entity holds additional modules. Neither view is wrong; they answer different questions for direct license management versus executive platform relationship oversight."
 
 Numbers depend on the random seed and on what the model plans and writes, so a different run (or a different question) will not
 reproduce these exactly. To generate a fresh run yourself, open the notebook in Colab using the badge at the top of this file, or
