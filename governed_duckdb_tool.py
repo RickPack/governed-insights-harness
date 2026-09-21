@@ -259,12 +259,35 @@ def _check_where_clause(
         return GateCheck(name="where_clause", passed=False, detail=f"Plan SQL is outside the governed subset: {unsupported}.")
 
     problems: list[str] = []
-    for predicate in inspected.top_level + inspected.nested:
+    allowed = contract.dimension_values()
+    in_sql: dict[str, set[str]] = {}
+    positioned = [(p, True) for p in inspected.top_level] + [(p, False) for p in inspected.nested]
+    for predicate, is_top_level in positioned:
         if isinstance(predicate, NumericPredicate):
             if not _is_governed(predicate, contract):
                 problems.append(f"{predicate.column} {predicate.operator} {predicate.value:g} is not a governed threshold")
+        elif not is_top_level:
+            problems.append(f"dimension filter on {predicate.column} must be in the top-level WHERE, not a subquery")
+        elif predicate.column not in allowed:
+            problems.append(
+                f"{predicate.column} is not a governed dimension of {contract.contract_id} "
+                f"(governed: {sorted(allowed) or 'none'})"
+            )
+        elif predicate.column in in_sql:
+            problems.append(f"{predicate.column} is filtered twice; use one predicate per dimension")
         else:
-            problems.append(f"filter on {predicate.column} is not a governed threshold or dimension filter")
+            unknown = sorted(set(predicate.values) - allowed[predicate.column])
+            if unknown:
+                problems.append(f"{predicate.column} value(s) {unknown} are not allowed (allowed: {sorted(allowed[predicate.column])})")
+            in_sql[predicate.column] = set(predicate.values)
+
+    declared = {f.column: set(f.values) for f in plan.dimension_filters}
+    if declared != in_sql:
+        problems.append(
+            "the plan's dimension_filters "
+            f"{ {c: sorted(v) for c, v in declared.items()} or 'none' } do not match the filters its SQL applies "
+            f"{ {c: sorted(v) for c, v in in_sql.items()} or 'none' }"
+        )
 
     try:
         named = contract.threshold(plan.threshold_name)
@@ -287,10 +310,11 @@ def _check_where_clause(
 
     if problems:
         return GateCheck(name="where_clause", passed=False, detail="; ".join(problems) + ".")
+    scoped = f"; scope: {', '.join(f.as_text() for f in plan.dimension_filters)}" if plan.dimension_filters else ""
     return GateCheck(
         name="where_clause",
         passed=True,
-        detail=f"WHERE is a conjunction of {len(inspected.top_level)} governed predicate(s); tables are governed.",
+        detail=f"WHERE is a conjunction of {len(inspected.top_level)} governed predicate(s); tables are governed{scoped}.",
     )
 
 

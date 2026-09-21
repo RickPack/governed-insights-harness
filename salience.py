@@ -41,7 +41,16 @@ from typing import Literal
 import duckdb
 from pydantic import BaseModel, Field
 
-from semantic_contracts import Lens, MetricContract
+from semantic_contracts import DimensionFilter, Lens, MetricContract
+
+
+class EmptySegmentError(Exception):
+    """Raised when the governed segment has no members, so there is nothing to profile.
+
+    Failing closed here is deliberate: every salience statistic is a comparison
+    with the segment, and a comparison with nothing is not zero, it is undefined.
+    """
+
 
 SalienceMethod = Literal["cohens_d", "percentage_point_delta"]
 Direction = Literal["higher", "lower", "similar"]
@@ -93,9 +102,17 @@ class SalienceRanking(BaseModel):
     contract_id: str = Field(description="Contract that defined the segment.")
     contract_version: str = Field(description="Version of that contract.")
     selection_metric: str = Field(description="The contract's metric column. Excluded from the lead insight because the segment was selected on it.")
+    scope: tuple[DimensionFilter, ...] = Field(
+        default=(),
+        description="Governed restrictions the question applied. The baseline is the grain restricted the same way.",
+    )
     segment_size: int = Field(description="Distinct entities in the segment.")
-    baseline_size: int = Field(description="Distinct entities in the baseline (the full grain).")
+    baseline_size: int = Field(description="Distinct entities in the baseline (the whole grain, or the grain within scope).")
     scores: list[SalienceScore] = Field(description="Scores sorted by absolute effect size, descending.")
+
+    def scope_text(self) -> str:
+        """The scope in plain words, or an empty string when the population was not restricted."""
+        return "; ".join(f.as_text() for f in self.scope)
 
     def top(self, n: int = 5) -> list[SalienceScore]:
         return self.scores[:n]
@@ -164,13 +181,30 @@ def _column_types(conn: duckdb.DuckDBPyConnection, table: str) -> dict[str, str]
     return {name: dtype.upper() for name, dtype in rows}
 
 
+def _baseline_source(contract: MetricContract, scope: tuple[DimensionFilter, ...]) -> str:
+    """The baseline population as a FROM item: the whole grain, or the grain restricted by the question's scope.
+
+    Filters are rendered by DimensionFilter.as_sql, which only accepts a plain
+    identifier for the column and doubles quotes in values. The plan they came
+    from was checked against the contract's allowlist before it executed.
+    """
+    if not scope:
+        return contract.source_table
+    predicate = " AND ".join(f.as_sql() for f in scope)
+    return f"(SELECT * FROM {contract.source_table} WHERE {predicate})"
+
+
 def _numeric_score(
-    conn: duckdb.DuckDBPyConnection, contract: MetricContract, segment_sql: str, attribute: str
+    conn: duckdb.DuckDBPyConnection,
+    contract: MetricContract,
+    segment_sql: str,
+    attribute: str,
+    scope: tuple[DimensionFilter, ...] = (),
 ) -> SalienceScore:
     """Cohen's d branch. Segment and baseline stats are computed in DuckDB in one statement."""
     entity = contract.entity_id_column
-    table = contract.source_table
-    # Baseline is the whole grain; segment is entities selected by the validated plan.
+    table = _baseline_source(contract, scope)
+    # Baseline is the whole grain (or the grain within scope); segment is entities selected by the validated plan.
     sql = f"""
         WITH seg AS (SELECT {entity} FROM ({segment_sql}) AS plan_result)
         SELECT
@@ -200,18 +234,22 @@ def _numeric_score(
 
 
 def _categorical_scores(
-    conn: duckdb.DuckDBPyConnection, contract: MetricContract, segment_sql: str, attribute: str
+    conn: duckdb.DuckDBPyConnection,
+    contract: MetricContract,
+    segment_sql: str,
+    attribute: str,
+    scope: tuple[DimensionFilter, ...] = (),
 ) -> list[SalienceScore]:
     """Percentage-point-delta branch. One score per level, shares computed over COUNT(DISTINCT entity)."""
     entity = contract.entity_id_column
-    table = contract.source_table
+    table = _baseline_source(contract, scope)
     sql = f"""
         WITH seg AS (SELECT {entity} FROM ({segment_sql}) AS plan_result),
         totals AS (
             SELECT
                 COUNT(DISTINCT {entity})                                                    AS base_n,
                 COUNT(DISTINCT CASE WHEN {entity} IN (SELECT {entity} FROM seg) THEN {entity} END) AS seg_n
-            FROM {table}
+            FROM {table} AS t
         )
         SELECT
             b.{attribute}                                                                                AS level,
@@ -247,14 +285,35 @@ def compute_salience(
     contract: MetricContract,
     segment_sql: str,
     attributes: tuple[str, ...] | None = None,
+    scope: tuple[DimensionFilter, ...] = (),
 ) -> SalienceRanking:
-    """Rank how each profile attribute differentiates the segment from its own grain's baseline.
+    """Rank how each profile attribute differentiates the segment from its own baseline.
+
+    The baseline is the whole grain, or, when the question restricted the
+    population (`scope`), the grain restricted the same way. Without that, a
+    "direct sales only" question would report that its segment is 100% direct
+    sales, which is true by construction and says nothing.
 
     `segment_sql` must already have passed the pre-execution validator; this
-    function trusts it only as far as wrapping it in a subquery.
+    function trusts it only as far as wrapping it in a subquery. Raises
+    EmptySegmentError when the segment has no members.
     """
     attributes = attributes or contract.profile_attributes + (contract.metric_expression,)
     types = _column_types(conn, contract.source_table)
+    entity = contract.entity_id_column
+
+    segment_size = conn.execute(
+        f"SELECT COUNT(DISTINCT {entity}) FROM ({segment_sql}) AS plan_result"
+    ).fetchone()[0]
+    baseline_size = conn.execute(
+        f"SELECT COUNT(DISTINCT {entity}) FROM {_baseline_source(contract, scope)} AS t"
+    ).fetchone()[0]
+    if int(segment_size) == 0:
+        within = f" within scope ({'; '.join(f.as_text() for f in scope)})" if scope else ""
+        raise EmptySegmentError(
+            f"The {contract.lens} segment is empty: 0 of {int(baseline_size)} {contract.entity_grain}s{within} "
+            f"meet the governed threshold, so there is nothing to profile."
+        )
 
     scores: list[SalienceScore] = []
     for attribute in attributes:
@@ -263,15 +322,9 @@ def compute_salience(
             raise KeyError(f"attribute {attribute!r} is not a column of {contract.source_table}")
         # The branch is chosen from the schema type. Categorical columns never see Cohen's d.
         if dtype in _CATEGORICAL_TYPES:
-            scores.extend(_categorical_scores(conn, contract, segment_sql, attribute))
+            scores.extend(_categorical_scores(conn, contract, segment_sql, attribute, scope))
         else:
-            scores.append(_numeric_score(conn, contract, segment_sql, attribute))
-
-    entity = contract.entity_id_column
-    segment_size = conn.execute(
-        f"SELECT COUNT(DISTINCT {entity}) FROM ({segment_sql}) AS plan_result"
-    ).fetchone()[0]
-    baseline_size = conn.execute(f"SELECT COUNT(DISTINCT {entity}) FROM {contract.source_table}").fetchone()[0]
+            scores.append(_numeric_score(conn, contract, segment_sql, attribute, scope))
 
     scores.sort(key=lambda s: abs(s.effect_size), reverse=True)
     return SalienceRanking(
@@ -279,6 +332,7 @@ def compute_salience(
         contract_id=contract.contract_id,
         contract_version=contract.version,
         selection_metric=contract.metric_expression,
+        scope=scope,
         segment_size=int(segment_size),
         baseline_size=int(baseline_size),
         scores=scores,

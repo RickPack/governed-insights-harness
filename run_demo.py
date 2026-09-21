@@ -24,7 +24,7 @@ import sys
 from tabulate import tabulate
 
 from pipeline import PipelineRun, run_dual_lens_pipeline
-from salience import SalienceRanking
+from salience import EmptySegmentError, SalienceRanking
 from semantic_contracts import ContextResolutionError, MetricContract
 from governed_duckdb_tool import GovernanceViolation
 
@@ -105,7 +105,13 @@ def print_run(run: PipelineRun) -> None:
         plan = run.governed_plan.plan.plan_for(lens)
         print(f"[{lens.upper()} LENS]  threshold={plan.threshold_name}")
         print(f"  {plan.sql}")
+        if plan.dimension_filters:
+            print("  scope: " + "; ".join(f.as_text() for f in plan.dimension_filters))
+        if plan.focus_attributes:
+            print("  focus: " + ", ".join(plan.focus_attributes))
         print(f"  rationale: {plan.rationale}\n")
+    if run.unapplied_qualifiers:
+        print("NOT APPLIED (no governed dimension covers): " + ", ".join(repr(q) for q in run.unapplied_qualifiers) + "\n")
 
     _banner("4. DUCKDB RESULTS (deterministic execution)")
     _print_result(run, "department")
@@ -170,6 +176,9 @@ def main() -> int:
         return 1
     except GovernanceViolation as exc:
         print(f"Pre-execution validator refused a plan: {exc}")
+        return 1
+    except EmptySegmentError as exc:
+        print(f"Nothing to profile: {exc}")
         return 1
 
     print_run(run)

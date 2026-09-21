@@ -84,6 +84,60 @@ class ThresholdDefinition(BaseModel):
         return f"{self.column} {self.operator} {literal}"
 
 
+class DimensionDefinition(BaseModel):
+    """A profile column a question may restrict the population by, and the only values it may use.
+
+    This is the allowlist behind question-driven scoping. "Direct sales only"
+    can become a filter because deployment_channel lists direct_sales here; a
+    value or column that is not listed cannot, whatever the model proposes.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    column: str = Field(description="Profile column the population may be restricted by.")
+    values: tuple[str, ...] = Field(description="Every value a filter on this column may name, exactly as stored.")
+    description: str = Field(description="What the column means and when a question is really asking for it.")
+
+    @field_validator("values")
+    @classmethod
+    def _values_are_distinct_and_present(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not value or len(set(value)) != len(value):
+            raise ValueError("a dimension needs at least one value, and no value may repeat")
+        return value
+
+
+_IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_]*$")
+
+
+class DimensionFilter(BaseModel):
+    """One restriction of the population: `column = value`, or `column IN (values)`."""
+
+    model_config = ConfigDict(frozen=True)
+
+    column: str = Field(description="A governed dimension column, exactly as listed on the contract.")
+    values: tuple[str, ...] = Field(min_length=1, description="One or more allowed values for that column.")
+
+    @field_validator("column")
+    @classmethod
+    def _column_is_an_identifier(cls, value: str) -> str:
+        """Filters are rendered into SQL for scoping, so the column must be a plain identifier."""
+        if not _IDENTIFIER.match(value):
+            raise ValueError(f"filter column must be a plain lower-case identifier, got {value!r}")
+        return value
+
+    def as_sql(self) -> str:
+        """The predicate this filter stands for. Quotes are doubled so a value can never end the literal."""
+        quoted = [f"'{v.replace(chr(39), chr(39) * 2)}'" for v in self.values]
+        if len(quoted) == 1:
+            return f"{self.column} = {quoted[0]}"
+        return f"{self.column} IN ({', '.join(quoted)})"
+
+    def as_text(self) -> str:
+        """Plain words for the brief and the renderers."""
+        shown = " or ".join(v.replace("_", " ") for v in self.values)
+        return f"{self.column.replace('_', ' ')} is {shown}"
+
+
 class MetricContract(BaseModel):
     """A versioned, reviewable definition of one business metric at one grain.
 
@@ -110,6 +164,13 @@ class MetricContract(BaseModel):
     )
     profile_attributes: tuple[str, ...] = Field(
         description="Attribute columns available for profiling at this grain."
+    )
+    filterable_dimensions: tuple[DimensionDefinition, ...] = Field(
+        default=(),
+        description=(
+            "Profile columns a question may restrict the population by, with the only values allowed. "
+            "A plan may not filter on anything else."
+        ),
     )
     keywords: tuple[str, ...] = Field(
         description="Lower-case phrases that indicate a question falls under this contract."
@@ -160,6 +221,21 @@ class MetricContract(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _dimensions_are_profile_columns(self) -> "MetricContract":
+        """A filter can only restrict by a column the contract profiles, once."""
+        columns = [d.column for d in self.filterable_dimensions]
+        if len(set(columns)) != len(columns):
+            raise ValueError("a dimension column may be listed only once")
+        unknown = [c for c in columns if c not in self.profile_attributes]
+        if unknown:
+            raise ValueError(f"filterable dimension(s) {unknown} are not profile attributes of this contract")
+        return self
+
+    def dimension_values(self) -> dict[str, frozenset[str]]:
+        """Column -> the values a filter on it may name."""
+        return {d.column: frozenset(d.values) for d in self.filterable_dimensions}
+
     # -- Helpers used by the retriever, the prompt, and the validator. --------
 
     def matches(self, query: str) -> bool:
@@ -179,6 +255,14 @@ class MetricContract(BaseModel):
         thresholds = "\n".join(
             f"    - {t.name}: {t.as_sql()}  ({t.description})" for t in self.thresholds
         )
+        dimensions = "\n".join(
+            f"    - {d.column}: one of {', '.join(d.values)}  ({d.description})" for d in self.filterable_dimensions
+        )
+        dimension_block = (
+            f"  governed dimensions (the ONLY columns a question may restrict the population by):\n{dimensions}\n"
+            if dimensions
+            else "  governed dimensions: none (the population cannot be restricted)\n"
+        )
         return (
             f"[{self.lens.upper()} LENS] contract_id={self.contract_id} version={self.version}\n"
             f"  scope: {self.scope}\n"
@@ -186,6 +270,7 @@ class MetricContract(BaseModel):
             f"  source table: {self.source_table}\n"
             f"  metric: {self.metric_name} = {self.metric_expression}\n"
             f"  governed thresholds (the ONLY numeric cutoffs allowed):\n{thresholds}\n"
+            f"{dimension_block}"
             f"  profile attributes: {', '.join(self.profile_attributes)}\n"
             f"  meaning: {self.description}"
         )
@@ -277,6 +362,28 @@ class PlannedQuery(BaseModel):
         )
     )
     rationale: str = Field(description="One or two sentences explaining how the plan follows the contract.")
+    dimension_filters: list[DimensionFilter] = Field(
+        default_factory=list,
+        description=(
+            "Restrictions the question asks for, drawn ONLY from the contract's governed dimensions and their allowed "
+            "values. Each one must also appear in the SQL WHERE clause, AND-joined with the threshold. "
+            "Leave empty when the question does not restrict the population."
+        ),
+    )
+    unapplied_qualifiers: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Words from the question that restrict the population but match no governed dimension value "
+            "(for example 'startups'). List them here instead of inventing a filter, so the reader is told they were not applied."
+        ),
+    )
+    focus_attributes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Profile attributes the question asks to concentrate on, chosen from the contract's profile attributes. "
+            "Leave empty to profile every attribute."
+        ),
+    )
 
     @field_validator("sql")
     @classmethod
@@ -344,7 +451,32 @@ class GovernedPlan(BaseModel):
                     f"{lens} plan cites {planned.contract_id} v{planned.contract_version}, "
                     f"but the resolved contract is {contract.contract_id} v{contract.version}"
                 )
+            self._check_scope(lens, planned, contract)
         return self
+
+    @staticmethod
+    def _check_scope(lens: str, planned: PlannedQuery, contract: MetricContract) -> None:
+        """A filter or focus attribute the contract does not govern is a hallucination, refused at the type boundary."""
+        allowed = contract.dimension_values()
+        seen: set[str] = set()
+        for f in planned.dimension_filters:
+            if f.column not in allowed:
+                raise ValueError(
+                    f"{lens} plan filters on {f.column!r}, which is not a governed dimension of {contract.contract_id}; "
+                    f"governed dimensions: {sorted(allowed) or 'none'}"
+                )
+            if f.column in seen:
+                raise ValueError(f"{lens} plan filters on {f.column!r} twice; use one filter with several values")
+            seen.add(f.column)
+            unknown = [v for v in f.values if v not in allowed[f.column]]
+            if unknown:
+                raise ValueError(
+                    f"{lens} plan filters {f.column} on {unknown}, which the contract does not allow; "
+                    f"allowed values: {sorted(allowed[f.column])}"
+                )
+        unknown_focus = [a for a in planned.focus_attributes if a not in contract.profile_attributes]
+        if unknown_focus:
+            raise ValueError(f"{lens} plan focuses on {unknown_focus}, which are not profile attributes of {contract.contract_id}")
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +489,30 @@ PROFILE_ATTRIBUTES: tuple[str, ...] = (
     "module_count",
     "deployment_channel",
     "org_tier",
+)
+
+# The columns a question may restrict the population by, and the only values a
+# restriction may name. tests/test_planner_scope.py asserts these equal the values
+# the synthetic generator can produce, so the two cannot drift apart silently.
+FILTERABLE_DIMENSIONS: tuple[DimensionDefinition, ...] = (
+    DimensionDefinition(
+        column="deployment_channel",
+        values=("direct_sales", "self_serve", "partner_channel"),
+        description="How the account was sold: by the direct sales team, self-serve sign-up, or a partner.",
+    ),
+    DimensionDefinition(
+        column="org_tier",
+        values=("smb", "mid_market", "enterprise"),
+        description=(
+            "Contracted customer tier. Use it only when the question names a tier, for example 'mid-market customers'. "
+            "The phrase 'enterprise accounts' describes the account base being analysed; it is NOT the enterprise tier."
+        ),
+    ),
+    DimensionDefinition(
+        column="org_maturity_band",
+        values=("0-2", "3-5", "6-10", "11-20", "20+"),
+        description="How long the organization has run the product, in years, as a band.",
+    ),
 )
 
 # Shared vocabulary that signals the question is about account value. Both
@@ -395,6 +551,7 @@ DEPARTMENT_CONTRACT = MetricContract(
         ),
     ),
     profile_attributes=PROFILE_ATTRIBUTES,
+    filterable_dimensions=FILTERABLE_DIMENSIONS,
     keywords=_VALUE_KEYWORDS + ("license level", "seat license revenue", "per license", "seat-license volume"),
     description=(
         "Value is the seat-license revenue a single license agreement generates in a year. This is the "
@@ -427,6 +584,7 @@ ENTERPRISE_CONTRACT = MetricContract(
         ),
     ),
     profile_attributes=PROFILE_ATTRIBUTES,
+    filterable_dimensions=FILTERABLE_DIMENSIONS,
     keywords=_VALUE_KEYWORDS
     + ("organization level", "consolidated platform revenue", "per organization", "parent organization", "consolidated"),
     description=(

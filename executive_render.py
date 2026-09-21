@@ -108,8 +108,9 @@ def _lens_card(run: PipelineRun, lens: str) -> str:
         f"<b>Metric:</b> {_plain(contract.metric_name)} &nbsp;·&nbsp; "
         f"<b>Floor:</b> {money(threshold.value)} &nbsp;·&nbsp; "
         f"<b>Contract:</b> {_plain(contract.contract_id)} v{contract.version}<br>"
-        f"<b>Segment:</b> {ranking.segment_size} of {ranking.baseline_size} {contract.entity_grain}s</div>"
-        f"{insight}{narrative}</div>"
+        f"<b>Segment:</b> {ranking.segment_size} of {ranking.baseline_size} {contract.entity_grain}s"
+        + (f"<br><b>Scope:</b> {_plain(ranking.scope_text())} (baseline is the same scope)" if ranking.scope else "")
+        + f"</div>{insight}{narrative}</div>"
     )
 
 
@@ -243,11 +244,20 @@ def render_executive_html(run: PipelineRun, title: str = "Highest-value enterpri
 
     audit = "".join(_audit_record(r) for r in run.audit_trail)
 
+    not_applied = (
+        '<div class="suppressed"><b>Not applied.</b> The question also asks for '
+        + ", ".join(escape(repr(q)) for q in run.unapplied_qualifiers)
+        + ", but no governed dimension covers it. Both lenses describe the population without it.</div>"
+        if run.unapplied_qualifiers
+        else ""
+    )
+
     return (
         _CSS
         + '<div class="gih">'
         + f"<h1>{escape(title)}</h1>"
         + f'<div class="sub">Question: {escape(context.query)}<br>{escape(run.dataset.render().splitlines()[0])}</div>'
+        + not_applied
         + finding
         + '<div class="grid">' + _lens_card(run, "department") + _lens_card(run, "enterprise") + "</div>"
         + _comparison_table(run)

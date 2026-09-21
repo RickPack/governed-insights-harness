@@ -113,7 +113,17 @@ prompt_template = ChatPromptTemplate.from_messages(
             "5. If a ratio is ever needed, the denominator must be COUNT(DISTINCT entity_id_column).\n"
             "6. Emit a single plain SELECT statement per lens with no trailing semicolon. The WHERE clause must be the "
             "governed threshold and nothing else, or AND-joined governed predicates. Do not use OR, NOT, UNION, WITH, "
-            "HAVING, LIMIT or table functions; a plan that does is refused before it runs.",
+            "HAVING, LIMIT or table functions; a plan that does is refused before it runs.\n"
+            "7. Restrict the population only when the question explicitly asks. If it does, and a governed dimension "
+            "covers the restriction, put it in dimension_filters (column and allowed values copied exactly from the "
+            "contract) AND apply the same restriction in the SQL WHERE clause, AND-joined with the threshold, for both "
+            "lenses. If the question adds a restriction no governed dimension covers, do NOT invent a filter: list it "
+            "in unapplied_qualifiers.\n"
+            "8. Most questions restrict nothing. Leave dimension_filters and unapplied_qualifiers empty unless the "
+            "question clearly restricts the population. The phrase 'enterprise accounts' names the account base, "
+            "not the enterprise customer tier.\n"
+            "9. Use focus_attributes only when the question asks to concentrate on particular profile attributes; "
+            "otherwise leave it empty. The SQL still selects every profile attribute.",
         ),
         (
             "human",

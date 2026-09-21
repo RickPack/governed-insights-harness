@@ -138,10 +138,22 @@ class NarrativeBrief(BaseModel):
     enterprise_decomposition: LensDecomposition | None = Field(
         default=None, description="Reconciled revenue movement for the enterprise lens, if computed."
     )
+    unapplied_qualifiers: list[str] = Field(
+        default_factory=list,
+        description="Restrictions in the question that match no governed dimension. They were not applied.",
+    )
 
     def render(self, top_n: int = 6) -> str:
         """Plain-text brief. Figures are pre-formatted so the model copies rather than computes."""
-        sections = [f"Business question: {self.context.query}", ""]
+        sections = [f"Business question: {self.context.query}"]
+        if self.unapplied_qualifiers:
+            sections.append(
+                "NOT APPLIED: the question also asks for "
+                + ", ".join(repr(q) for q in self.unapplied_qualifiers)
+                + ", but no governed dimension covers it. Both lenses below describe the population without it. "
+                "State this plainly in the reconciliation memo."
+            )
+        sections.append("")
         for lens in ("department", "enterprise"):
             contract = self.context.contract_for(lens)
             result = self.department_result if lens == "department" else self.enterprise_result
@@ -150,6 +162,11 @@ class NarrativeBrief(BaseModel):
             sections.append(f"=== {lens.upper()} LENS — {contract.contract_id} v{contract.version} ===")
             sections.append(f"Grain: {contract.entity_grain}. Metric: {contract.metric_name} ({contract.metric_expression}).")
             sections.append(f"Threshold: {contract.thresholds[0].as_sql()}. {contract.description}")
+            if ranking.scope:
+                sections.append(
+                    f"Scope: the question restricts this lens to {ranking.scope_text()}. Baseline is every "
+                    f"{contract.entity_grain} in that scope, not the whole base."
+                )
             sections.append(
                 f"Segment size: {ranking.segment_size} of {ranking.baseline_size} {contract.entity_grain}s "
                 f"(result rows: {result.row_count})."
@@ -194,6 +211,9 @@ _INSTRUCTIONS = (
     "underscores in prose; write attribute names as plain words. "
     "Where a lens section includes a revenue movement block, describe the movement using only its figures; "
     "it explains seat-license revenue only, and the labelled subset does not reconcile to the full change. "
+    "When a lens section names a scope, say so in that lens's headline or narrative, and remember that its "
+    "baseline is the scoped population. When the brief says a qualifier was NOT APPLIED, tell the reader in the "
+    "reconciliation memo. "
     "Explain the divergence between lenses in terms of grain, metric, and threshold."
 )
 

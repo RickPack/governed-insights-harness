@@ -35,7 +35,7 @@ from governed_duckdb_tool import (
 from langchain_context_chain import build_planning_chain, default_chat_model
 from narrative_agent import ExecutiveDeliverable, NarrativeBrief, synthesize_narrative
 from salience import SalienceRanking, compute_salience
-from semantic_contracts import GovernedPlan
+from semantic_contracts import GovernedPlan, MetricContract, PlannedQuery
 from synthetic_data import TierSummary, build_database
 
 
@@ -77,6 +77,10 @@ class PipelineRun(BaseModel):
     department_decomposition: LensDecomposition = Field(description="Reconciled revenue movement, department lens.")
     enterprise_decomposition: LensDecomposition = Field(description="Reconciled revenue movement, enterprise lens.")
     audit_trail: list[AuditRecord] = Field(description="One record per tool call.")
+    unapplied_qualifiers: list[str] = Field(
+        default_factory=list,
+        description="Restrictions in the question that match no governed dimension, so were not applied.",
+    )
     gate: GateOutcome = Field(description="Final zero-token-math gate outcome.")
     deliverable: ExecutiveDeliverable | None = Field(description="Verified narrative, or None if suppressed.")
     narrative_suppressed: bool = Field(description="True when the pipeline failed closed on the narrative.")
@@ -88,6 +92,22 @@ class PipelineRun(BaseModel):
 
     def salience_for(self, lens: str) -> SalienceRanking:
         return self.department_salience if lens == "department" else self.enterprise_salience
+
+
+def _salience_attributes(contract: MetricContract, plan: PlannedQuery) -> tuple[str, ...] | None:
+    """The attributes to profile: the question's focus plus the selection metric, or every attribute when it names none."""
+    if not plan.focus_attributes:
+        return None
+    return tuple(dict.fromkeys(plan.focus_attributes)) + (contract.metric_expression,)
+
+
+def _unapplied_qualifiers(*plans: PlannedQuery) -> list[str]:
+    """Restrictions the question asked for that no governed dimension covers, in first-seen order, without repeats."""
+    seen: dict[str, None] = {}
+    for plan in plans:
+        for qualifier in plan.unapplied_qualifiers:
+            seen.setdefault(qualifier.strip(), None)
+    return [q for q in seen if q]
 
 
 def run_dual_lens_pipeline(
@@ -132,20 +152,34 @@ def run_dual_lens_pipeline(
 
     lap("execute")
 
-    # 3. Salience per lens against its own baseline. No model involvement.
+    # 3. Salience per lens against its own baseline, restricted the way the question
+    # restricted the population. No model involvement: the plan only names governed
+    # filters, and the arithmetic below is SQL.
+    department_plan, enterprise_plan = governed_plan.plan.department, governed_plan.plan.enterprise
+    department_scope = tuple(department_plan.dimension_filters)
+    enterprise_scope = tuple(enterprise_plan.dimension_filters)
     department_salience = compute_salience(
-        conn, governed_plan.context.department_contract, governed_plan.plan.department.sql
+        conn,
+        governed_plan.context.department_contract,
+        department_plan.sql,
+        attributes=_salience_attributes(governed_plan.context.department_contract, department_plan),
+        scope=department_scope,
     )
     enterprise_salience = compute_salience(
-        conn, governed_plan.context.enterprise_contract, governed_plan.plan.enterprise.sql
+        conn,
+        governed_plan.context.enterprise_contract,
+        enterprise_plan.sql,
+        attributes=_salience_attributes(governed_plan.context.enterprise_contract, enterprise_plan),
+        scope=enterprise_scope,
     )
 
     lap("salience")
 
-    # 3b. Revenue movement per lens. Deterministic; raises ReconciliationError (a
-    # GovernanceViolation) before any narration if components do not add up.
-    department_decomposition = decompose(conn, "department")
-    enterprise_decomposition = decompose(conn, "enterprise")
+    # 3b. Revenue movement per lens, over the same restricted population. Deterministic;
+    # raises ReconciliationError (a GovernanceViolation) before any narration if
+    # components do not add up.
+    department_decomposition = decompose(conn, "department", scope=department_scope)
+    enterprise_decomposition = decompose(conn, "enterprise", scope=enterprise_scope)
 
     lap("decomposition")
 
@@ -169,6 +203,7 @@ def run_dual_lens_pipeline(
         enterprise_salience=enterprise_salience,
         department_decomposition=department_decomposition,
         enterprise_decomposition=enterprise_decomposition,
+        unapplied_qualifiers=_unapplied_qualifiers(department_plan, enterprise_plan),
     )
     narrative = synthesize_narrative(brief, fact_base, model=narrative_model)
     lap("narrative")
@@ -184,6 +219,7 @@ def run_dual_lens_pipeline(
         department_decomposition=department_decomposition,
         enterprise_decomposition=enterprise_decomposition,
         audit_trail=tool.audit_trail,
+        unapplied_qualifiers=brief.unapplied_qualifiers,
         gate=narrative.gate,
         deliverable=narrative.deliverable,
         narrative_suppressed=narrative.suppressed,

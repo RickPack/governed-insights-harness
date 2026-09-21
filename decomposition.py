@@ -51,7 +51,7 @@ import duckdb
 from pydantic import BaseModel, ConfigDict, Field
 
 from governed_duckdb_tool import GovernanceViolation
-from semantic_contracts import DEPARTMENT_CONTRACT, ENTERPRISE_CONTRACT, Lens
+from semantic_contracts import DEPARTMENT_CONTRACT, ENTERPRISE_CONTRACT, DimensionFilter, Lens
 
 DEFAULT_PERIOD = "2025-Q4"
 RECONCILIATION_TOLERANCE = 0.01
@@ -229,6 +229,9 @@ class LensDecomposition(BaseModel):
     grain: str
     period: str
     scope_note: str
+    scope: tuple[DimensionFilter, ...] = Field(
+        default=(), description="Governed restrictions the question applied. Empty means the full population."
+    )
     entities: int
     begin_revenue: float
     end_revenue: float
@@ -316,24 +319,42 @@ def _sum_components(rows: list[DecompositionRow]) -> Components:
     )
 
 
-def decompose(conn: duckdb.DuckDBPyConnection, lens: Lens, period: str = DEFAULT_PERIOD) -> LensDecomposition:
+def decompose(
+    conn: duckdb.DuckDBPyConnection,
+    lens: Lens,
+    period: str = DEFAULT_PERIOD,
+    scope: tuple[DimensionFilter, ...] = (),
+) -> LensDecomposition:
     """Decompose one lens for one period, or raise ReconciliationError.
 
     Reconciliation is checked on every license (department) or organization
-    (enterprise) in the full population before anything is returned.
+    (enterprise) in the population before anything is returned. That is the
+    full population unless the question restricted it (`scope`), in which case
+    it is the same restricted population the plan's baseline uses; each entity
+    still reconciles on its own, so a restriction cannot hide a discrepancy.
     """
     if lens == "department":
         sql, grain = _LICENSE_SQL, "license"
         scope_note = "seat-license revenue; every movement counts"
         floor = DEPARTMENT_CONTRACT.threshold("high_value_floor")
         floor_rule = f"licenses with end-of-period seat-license revenue {floor.operator} {floor.value:,.0f}"
+        source = DEPARTMENT_CONTRACT
     else:
         sql, grain = _ORGANIZATION_SQL, "organization"
         scope_note = "seat-license part of platform revenue only; migrations inside one organization net to zero"
         floor = ENTERPRISE_CONTRACT.threshold("high_value_floor")
         floor_rule = f"organizations with consolidated platform revenue {floor.operator} {floor.value:,.0f}"
+        source = ENTERPRISE_CONTRACT
 
     records = [r for r in conn.execute(sql).fetchall() if r[1] == period]
+    if scope:
+        predicate = " AND ".join(f.as_sql() for f in scope)
+        in_scope = {
+            row[0]
+            for row in conn.execute(f"SELECT {source.entity_id_column} FROM {source.source_table} WHERE {predicate}").fetchall()
+        }
+        records = [r for r in records if r[0] in in_scope]
+        scope_note += f"; restricted to {'; '.join(f.as_text() for f in scope)}"
     rows = [_row(r) for r in records]
     orphans = tuple(
         MovementFlag(movement_id=m, license_id=lid, reason="movement matches no license snapshot")
@@ -370,6 +391,7 @@ def decompose(conn: duckdb.DuckDBPyConnection, lens: Lens, period: str = DEFAULT
         grain=grain,
         period=period,
         scope_note=scope_note,
+        scope=scope,
         entities=len(rows),
         begin_revenue=sum(r.begin_revenue for r in rows),
         end_revenue=sum(r.end_revenue for r in rows),

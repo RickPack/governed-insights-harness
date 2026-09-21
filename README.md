@@ -53,7 +53,8 @@ The harness treats the ambiguity as the deliverable rather than as noise to reso
    registry. If either lens has no matching contract, the pipeline raises `ContextResolutionError` rather than guessing.
 3. **One structured planning call produces one query plan per lens.** The model sees both contracts explicitly labelled and must return
    a `DualLensPlan`. A plan that applies the organization threshold to the license table is a visible mismatch between the plan and the
-   contract it cites, and it is rejected at the type boundary.
+   contract it cites, and it is rejected at the type boundary. The plan can also carry a governed restriction: "direct sales only"
+   becomes a `deployment_channel` filter if, and only if, the contract lists that column and value.
 4. **A governed DuckDB tool validates before it executes.** Grain discipline (ratios divide by `COUNT(DISTINCT entity_id)`), governed
    thresholds only, no cross-grain joins without intermediate aggregation, and a WHERE clause that is an AND of governed predicates,
    read from DuckDB's parsed syntax tree rather than from the SQL text. Every call writes a typed audit record.
@@ -211,6 +212,7 @@ producing `DualLensPlan` and producing `ExecutiveDeliverable`. Everything betwee
 | `langchain_context_chain.py` | LCEL chain: retrieval, prompt, structured planning, governed plan. |
 | `governed_duckdb_tool.py` | Pre-execution validator, DuckDB tool, audit records, the zero-token-math gate. |
 | `sql_predicates.py` | Parse-based inspection of planned SQL: which predicates and tables a plan actually uses. Refuses OR, NOT, UNION, LIMIT and the like. |
+| `tests/test_planner_scope.py` | Thirty-one cases (parametrised) for governed, question-driven scoping: the allowlist, plan validation, refusals, scoped baseline and decomposition, an empty segment, and an end-to-end run. |
 | `salience.py` | Per-lens attribute salience; Cohen's d for numeric, percentage-point delta for categorical. |
 | `narrative_agent.py` | PydanticAI agent with the gate wired in as an output validator; fails closed. |
 | `pipeline.py` | The one composition function both entry points call; returns a typed `PipelineRun`. |
@@ -298,6 +300,17 @@ exercised for real. The narrative model is PydanticAI's `TestModel`. Nothing els
 `tests/test_sql_governance.py` adds twenty more (parametrised) for the WHERE-clause check. It includes `WHERE floor OR 1 = 1` and `WHERE NOT (floor)`, which the earlier text-matching rules accepted and which return rows outside the segment; a test runs the widened SQL directly to show the floor is defeated, and another confirms the tool now refuses it and audits the refusal. The other three files add 27 cases, also offline. `tests/test_decomposition.py` covers a clean reconciliation, an injected discrepancy that fails closed, internal versus cross-organization migration, the grain invariant, contraction versus churn, a migration with a missing destination, and a period with no movement. `tests/test_contracts.py` covers owners and the collision check. `tests/test_equivalence.py` checks the Tango interval against a numeric vector from R's `PropCIs::scoreci.mp`, the orientation of the estimate, the decision rule, that discordant counts are always reported, and that the seeded Monte Carlo power and size are reproducible.
 
 ## Design decisions worth knowing
+
+- **What the planner does that the contract cannot.** For the demo question, nothing: the correct SQL follows from the contract, and
+  the validator refuses anything else, so a model that is right reproduces the contract's SQL. An earlier version of this repository
+  had exactly that weakness. The planner earns its place where a question restricts the population in words a contract cannot
+  anticipate ("direct sales only", "mid-market customers", "focus on tenure"). Each contract lists the columns a question may restrict
+  by and the only values allowed (`filterable_dimensions`). The model proposes filters; a type-boundary check refuses any column or
+  value outside that list; the tool refuses SQL that applies anything other than the filters the plan declares; and the baseline,
+  salience ranking and revenue decomposition are all computed over the same restricted population, so a "direct sales" segment is
+  not reported as distinctively direct-sales by construction. A qualifier that no governed dimension covers ("startups") is not
+  guessed at: it is listed in `unapplied_qualifiers`, shown to the reader and stated in the memo. Whether a live model fills these
+  slots reliably is a measurement, not something the offline tests can show.
 
 - **The validator reads the syntax tree, not the SQL text.** The first version matched the governed cutoff with regular expressions.
   Probing it showed the cutoff can be present in the text and defeated in effect: `WHERE license_revenue >= 5000 OR 1 = 1` returned all
