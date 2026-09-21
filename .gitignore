@@ -18,3 +18,6 @@ venv/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local live-evaluation results (copy a summary into the README by hand if you want it published)
+eval_runs/

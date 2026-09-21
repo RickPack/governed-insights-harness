@@ -212,6 +212,8 @@ producing `DualLensPlan` and producing `ExecutiveDeliverable`. Everything betwee
 | `langchain_context_chain.py` | LCEL chain: retrieval, prompt, structured planning, governed plan. |
 | `governed_duckdb_tool.py` | Pre-execution validator, DuckDB tool, audit records, the zero-token-math gate. |
 | `sql_predicates.py` | Parse-based inspection of planned SQL: which predicates and tables a plan actually uses. Refuses OR, NOT, UNION, LIMIT and the like. |
+| `eval_live.py` | Live evaluation: runs a fixed question set several times, scores scope and gate outcomes, reports rates with Wilson intervals. Spends nothing without `--yes`. |
+| `tests/test_eval_live.py` | Fifteen cases (parametrised) for the interval arithmetic, scoring, failure classification, the eval set's consistency with the contract vocabulary, and the no-spend guard. |
 | `tests/test_planner_scope.py` | Thirty-one cases (parametrised) for governed, question-driven scoping: the allowlist, plan validation, refusals, scoped baseline and decomposition, an empty segment, and an end-to-end run. |
 | `salience.py` | Per-lens attribute salience; Cohen's d for numeric, percentage-point delta for categorical. |
 | `narrative_agent.py` | PydanticAI agent with the gate wired in as an output validator; fails closed. |
@@ -242,6 +244,10 @@ python -m pytest tests -q
 export GOOGLE_API_KEY="your-key"        # PowerShell: setx GOOGLE_API_KEY "your-key", then reopen the shell
 python run_demo.py
 
+# Measure the live pipeline over a fixed question set. Prints the plan and sends nothing until you add --yes.
+python eval_live.py --runs 5
+python eval_live.py --runs 5 --yes
+
 # Refresh the committed notebook's outputs (regenerate, execute, verify, date-stamp).
 # The notebook execution packages are pinned in requirements.txt alongside everything else.
 python execute_notebook.py
@@ -251,6 +257,19 @@ Or open the notebook in Colab with the badge above and store the key as a Colab 
 
 The demo asks one question and prints, in order: the question, both resolved contracts, both generated SQL statements, both DuckDB
 result sets, both salience rankings, the reconciled revenue movement for each lens, the validator and gate outcomes with run telemetry, both lens summaries, and the reconciliation memo.
+
+## Measuring the live pipeline
+
+The offline tests mock the model, so they show the governance layer holds when a model is wrong or right in a specific way. They
+cannot show how often a real model is right. `eval_live.py` measures that: five hand-written questions (an unrestricted one, two with
+governed restrictions, one asking for a restriction no dimension covers, one naming an attribute to focus on), each run several times.
+It reports how many runs complete and how the rest fail, how often the planner produced exactly the right scope (including none for the
+demo question, whose words "enterprise accounts" must not become a tier filter), how often the narrative passes the gate on the first
+attempt or is suppressed, and the model calls and wall-clock time observed. Proportions carry a 95% Wilson interval.
+
+No results are published here. The script has been tested offline (interval arithmetic, scoring, failure classification, and a guard
+that spends nothing without `--yes`), but I have not run it against the live model, and any figures would describe one model, one
+synthetic dataset and a small question set at a small number of runs, so the intervals would be wide.
 
 ## Sample run
 
